@@ -54,6 +54,9 @@ class SafetyConfig(BaseModel):
     allow_arbitrary_shell: bool = Field(
         default=False, description="Whether untrusted shell scripts are permitted"
     )
+    confirmation_ttl_seconds: int = Field(
+        default=300, ge=1, le=3600, description="Expiration time in seconds for confirmation requests"
+    )
 
 
 class VoiceConfig(BaseModel):

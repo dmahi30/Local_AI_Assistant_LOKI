@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum, IntEnum
+import time
 from typing import Any
 from pydantic import BaseModel, Field
 
@@ -71,3 +72,5 @@ class SafetyConfirmationRequest(BaseModel):
     targets: list[str]
     safety_level: SafetyLevel = SafetyLevel.DANGEROUS
     confirmed: bool = False
+    created_at: float = Field(default_factory=time.time, description="Creation timestamp in epoch seconds")
+    ttl_seconds: int = Field(default=300, description="Time to live in seconds before expiration")
