@@ -19,8 +19,8 @@ def mock_ollama_client() -> MagicMock:
     client = MagicMock(spec=OllamaClient)
     client.host = "http://127.0.0.1:11434"
     client.check_health.return_value = True
-    client.list_local_models.return_value = ["qwen2.5:3b", "qwen2.5:1.5b"]
-    client.is_model_available.side_effect = lambda m: m in ["qwen2.5:3b", "qwen2.5:1.5b"]
+    client.list_local_models.return_value = ["qwen2.5:0.5b", "qwen2.5:3b", "qwen2.5:1.5b"]
+    client.is_model_available.side_effect = lambda m: m in ["qwen2.5:0.5b", "qwen2.5:3b", "qwen2.5:1.5b"]
     client.chat.return_value = "Mocked LLM conversational reply."
     client.generate.return_value = "Mocked LLM single-turn response."
     return client
@@ -92,7 +92,7 @@ def test_agent_conversational_chat(mock_ollama_client):
     assert res.success is True
     assert res.source == ResponseSource.LLM
     assert res.text == "Mocked LLM conversational reply."
-    assert res.model_used == "qwen2.5:3b"
+    assert res.model_used == "qwen2.5:0.5b"
 
     # Context history should contain the user turn and the assistant turn
     history = agent.get_history()

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LOKI — Your AI Companion</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body class="dark-theme">
+  <div class="app-layout">
+    <!-- LEFT SIDEBAR -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <div class="emblem-wrapper">
+            <img src="/static/emblem.svg" alt="Loki Emblem" class="brand-emblem">
+          </div>
+          <div class="brand-text">
+            <h1 class="logo-title">LOKI</h1>
+            <span class="logo-tagline">YOUR AI COMPANION</span>
+          </div>
+        </div>
+        <button class="icon-btn collapse-btn" id="toggleSidebarBtn" title="Toggle Sidebar (Ctrl+B)">
+          <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+      </div>
+
+      <div class="sidebar-action">
+        <button class="new-chat-btn" id="newChatBtn">
+          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 5v14M5 12h14"/></svg>
+          <span class="btn-label">New Chat</span>
+        </button>
+      </div>
+
+      <nav class="nav-menu">
+        <button class="nav-item active" data-tab="chat">
+          <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <span class="nav-label">Chat</span>
+        </button>
+        <button class="nav-item planned" data-tab="explore" title="Planned feature">
+          <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>
+          <span class="nav-label">Explore</span>
+          <span class="badge">Planned</span>
+        </button>
+        <button class="nav-item planned" data-tab="library" title="Planned feature">
+          <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <span class="nav-label">Library</span>
+          <span class="badge">Planned</span>
+        </button>
+        <button class="nav-item" id="navSettingsBtn">
+          <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span class="nav-label">Settings</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-divider"></div>
+
+      <div class="recent-section">
+        <div class="recent-header">
+          <span class="recent-title">Recent Chats</span>
+          <button class="icon-btn-subtle" id="searchChatsBtn" title="Search chats">
+            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          </button>
+        </div>
+        <div class="recent-list" id="recentList">
+          <div class="recent-item active" data-chat-id="current">
+            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <div class="recent-info">
+              <span class="recent-name" id="activeChatTitle">Current Session</span>
+              <span class="recent-time">Active</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="watermark-wrapper">
+          <img src="/static/emblem.svg" alt="" class="watermark-art">
+        </div>
+      </div>
+    </aside>
+
+    <!-- CENTER CHAT AREA -->
+    <main class="chat-main">
+      <header class="chat-header">
+        <div class="header-left">
+          <h2 class="chat-title">Chat with Loki</h2>
+          <span class="chat-subtitle">Ask. Explore. Create. Solve.</span>
+        </div>
+        <div class="header-right">
+          <!-- Ollama Connection Status Badge -->
+          <div class="status-indicator-pill" id="ollamaStatusPill" title="Local Ollama Connection Status">
+            <span class="status-dot" id="statusDot"></span>
+            <span class="status-text" id="statusPillText">Checking...</span>
+          </div>
+
+          <!-- System Status Drawer Toggle -->
+          <button class="icon-btn header-action-btn" id="toggleDrawerBtn" title="System Diagnostics & Telemetry">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+          </button>
+
+          <!-- Clear Conversation Button -->
+          <button class="icon-btn header-action-btn" id="clearChatBtn" title="Clear conversation (Ctrl+L)">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- CONVERSATION CONTAINER -->
+      <section class="messages-viewport" id="messagesViewport">
+        <!-- Empty State (Shown initially) -->
+        <div class="empty-state" id="emptyState">
+          <div class="empty-emblem-halo">
+            <img src="/static/emblem.svg" alt="Loki Emblem" class="empty-emblem">
+          </div>
+          <h3 class="empty-heading">Greetings, mortal.</h3>
+          <p class="empty-description">
+            I am LOKI, your privacy-first AI companion running 100% locally on your machine.
+            Ask questions, explore complex concepts, or command your local system.
+          </p>
+          <div class="prompt-chips">
+            <button class="chip" data-prompt="what is my battery percentage">
+              <span class="chip-icon">⚡</span> Check battery and telemetry
+            </button>
+            <button class="chip" data-prompt="Explain what this Python code does: [x * 2 for x in [1, 2, 3]]">
+              <span class="chip-icon">🐍</span> Explain Python list comprehension
+            </button>
+            <button class="chip" data-prompt="What is 25 + 17?">
+              <span class="chip-icon">🔢</span> Basic arithmetic calculation
+            </button>
+            <button class="chip" data-prompt="How does local offline AI protect user privacy?">
+              <span class="chip-icon">🛡️</span> Offline privacy architecture
+            </button>
+          </div>
+        </div>
+
+        <!-- Chat Stream -->
+        <div class="chat-stream" id="chatStream"></div>
+      </section>
+
+      <!-- FIXED BOTTOM COMPOSER -->
+      <footer class="composer-container">
+        <form class="composer-form" id="composerForm">
+          <button type="button" class="composer-action-btn" id="attachBtn" title="Attachments (Planned - Phase 7)">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+          </button>
+
+          <textarea
+            class="composer-input"
+            id="messageInput"
+            placeholder="Message Loki... (Press Enter to send, Shift+Enter for newline)"
+            rows="1"
+            autofocus
+          ></textarea>
+
+          <button type="button" class="composer-action-btn" id="voiceBtn" title="Voice Input (Planned - Phase 6)">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          </button>
+
+          <button type="submit" class="send-btn" id="sendBtn" title="Send message (Enter)">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </form>
+        <div class="composer-disclaimer">
+          <span>LOKI runs entirely offline. Zero telemetry. Zero remote connections.</span>
+        </div>
+      </footer>
+    </main>
+
+    <!-- RIGHT SYSTEM STATUS DRAWER -->
+    <aside class="status-drawer" id="statusDrawer">
+      <div class="drawer-header">
+        <div class="drawer-title-group">
+          <h3 class="drawer-title">System Diagnostics</h3>
+          <span class="drawer-subtitle">Actual project telemetry</span>
+        </div>
+        <button class="icon-btn close-drawer-btn" id="closeDrawerBtn" title="Close Diagnostics">
+          <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2" fill="none"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+
+      <div class="drawer-body">
+        <!-- OLLAMA DAEMON STATUS -->
+        <div class="metric-card">
+          <div class="metric-card-header">
+            <span class="metric-label">Local Ollama Runtime</span>
+            <span class="metric-badge" id="drawerOllamaBadge">Checking</span>
+          </div>
+          <div class="metric-details">
+            <div class="detail-row">
+              <span class="detail-key">Endpoint</span>
+              <span class="detail-val" id="drawerOllamaHost">127.0.0.1:11434</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-key">Daemon Version</span>
+              <span class="detail-val" id="drawerOllamaVersion">—</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- MODEL RUNTIME CONFIG -->
+        <div class="metric-card">
+          <div class="metric-card-header">
+            <span class="metric-label">Model Configuration</span>
+          </div>
+          <div class="metric-details">
+            <div class="detail-row">
+              <span class="detail-key">Active Model</span>
+              <span class="detail-val gold-accent" id="drawerActiveModel">—</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-key">Hardware Tier</span>
+              <span class="detail-val" id="drawerHardwareTier">—</span>
+            </div>
+            <div class="detail-row">
+              <span class="detail-key">Privacy Mode</span>
+              <span class="detail-val green-accent" id="drawerPrivacyMode">Offline Enforced</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- HARDWARE TELEMETRY -->
+        <div class="metric-card">
+          <div class="metric-card-header">
+            <span class="metric-label">System Resources</span>
+          </div>
+          <div class="resource-group">
+            <div class="resource-item">
+              <div class="resource-top">
+                <span class="resource-name">RAM Usage</span>
+                <span class="resource-num" id="drawerRamText">— GB / — GB</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div class="progress-bar-fill" id="drawerRamBar" style="width: 0%;"></div>
+              </div>
+            </div>
+
+            <div class="resource-item">
+              <div class="resource-top">
+                <span class="resource-name">CPU Load</span>
+                <span class="resource-num" id="drawerCpuText">—% across — cores</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div class="progress-bar-fill" id="drawerCpuBar" style="width: 0%;"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- REFRESH BUTTON -->
+        <button class="refresh-status-btn" id="refreshStatusBtn">
+          <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          <span>Refresh Telemetry</span>
+        </button>
+      </div>
+    </aside>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

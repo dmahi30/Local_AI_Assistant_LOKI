@@ -31,6 +31,7 @@ from .core.types import SafetyConfirmationRequest, ToolResult
 from .llm.client import OllamaClient
 from .llm.resolver import ModelResolver
 from .safety.gatekeeper import SafetyGatekeeper
+from .utils.paths import get_config_path
 
 logger = get_logger("agent")
 
@@ -74,7 +75,16 @@ class LokiAgent:
         system_prompt: str | None = None,
         allow_fallback: bool = False,
     ) -> None:
-        self.config = config or LokiConfig()
+        if config is None:
+            config_file = get_config_path()
+            if config_file.exists():
+                try:
+                    config = LokiConfig.load(config_file)
+                except Exception:
+                    config = LokiConfig()
+            else:
+                config = LokiConfig()
+        self.config = config
         self.gatekeeper = gatekeeper or SafetyGatekeeper(config=self.config.safety)
         self.router = router or DeterministicRouter(gatekeeper=self.gatekeeper)
         self.client = client or OllamaClient(self.config.models)

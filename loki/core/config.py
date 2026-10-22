@@ -33,8 +33,8 @@ class HardwareConfig(BaseModel):
 
 class ModelRuntimeConfig(BaseModel):
     """Local LLM and embedding configuration."""
-    active_model: str = Field(default="qwen2.5:3b", description="Primary Ollama model name")
-    fallback_models: list[str] = Field(default_factory=lambda: ["qwen2.5:1.5b"], description="Ordered fallbacks")
+    active_model: str = Field(default="qwen2.5:0.5b", description="Primary Ollama model name")
+    fallback_models: list[str] = Field(default_factory=list, description="Ordered fallbacks")
     embedding_model: str = Field(default="nomic-embed-text", description="Local embedding model")
     ollama_host: str = Field(default="http://127.0.0.1:11434", description="Local Ollama HTTP endpoint")
     context_length: int = Field(default=32768, description="Active context token window")
