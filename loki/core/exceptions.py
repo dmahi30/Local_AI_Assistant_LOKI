@@ -72,3 +72,7 @@ class SafetyViolationError(ToolError):
 # Storage & Memory
 class StorageError(LokiError):
     """Raised when local SQLite or file storage fails."""
+
+
+class ConversationNotFoundError(StorageError):
+    """Raised when a requested conversation ID does not exist."""

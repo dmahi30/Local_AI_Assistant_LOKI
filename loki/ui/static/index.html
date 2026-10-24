@@ -3,8 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>LOKI — Your AI Companion</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=6.0.2">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
@@ -61,18 +64,14 @@
       <div class="recent-section">
         <div class="recent-header">
           <span class="recent-title">Recent Chats</span>
-          <button class="icon-btn-subtle" id="searchChatsBtn" title="Search chats">
+          <button type="button" class="icon-btn-subtle" id="searchChatsBtn" title="Search chats" aria-label="Search chats">
             <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           </button>
         </div>
+        <div class="recent-search-bar" id="recentSearchBar" style="display: none;">
+          <input type="text" id="recentSearchInput" placeholder="Filter chats..." class="recent-search-input" autocomplete="off" aria-label="Filter recent chats">
+        </div>
         <div class="recent-list" id="recentList">
-          <div class="recent-item active" data-chat-id="current">
-            <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <div class="recent-info">
-              <span class="recent-name" id="activeChatTitle">Current Session</span>
-              <span class="recent-time">Active</span>
-            </div>
-          </div>
         </div>
       </div>
 
@@ -259,6 +258,6 @@
     </aside>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=6.0.2"></script>
 </body>
 </html>

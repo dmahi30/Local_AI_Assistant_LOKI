@@ -20,7 +20,14 @@ import psutil
 
 from ..agent import AgentResponse, LokiAgent, ResponseSource
 from ..core.config import LokiConfig
+from ..core.exceptions import ConversationNotFoundError, StorageError
 from ..core.logging import get_logger
+from ..storage import (
+    ConversationDetail,
+    ConversationStore,
+    ConversationSummary,
+    MessageRecord,
+)
 
 logger = get_logger("ui.server")
 
@@ -32,12 +39,14 @@ class ChatRequest(BaseModel):
     message: str = Field(..., description="User prompt or command text")
     action_id: str | None = Field(default=None, description="Confirmation token if approving a gated action")
     chat_mode: bool = Field(default=True, description="Whether to retain multi-turn context")
+    conversation_id: str | None = Field(default=None, description="Target conversation session ID")
 
 
 class ConfirmRequest(BaseModel):
     """Payload for approving a pending gated action."""
     action_id: str = Field(..., description="Confirmation token identifier")
     original_message: str = Field(..., description="Original command string to execute")
+    conversation_id: str | None = Field(default=None, description="Target conversation session ID")
 
 
 class CancelRequest(BaseModel):
@@ -45,9 +54,26 @@ class CancelRequest(BaseModel):
     action_id: str = Field(..., description="Confirmation token identifier")
 
 
-def create_ui_app(agent: LokiAgent | None = None) -> FastAPI:
+class CreateConversationRequest(BaseModel):
+    """Payload for creating a new conversation."""
+    title: str = Field(default="New Chat", description="Initial title of conversation")
+
+
+class UpdateConversationRequest(BaseModel):
+    """Payload for renaming a conversation."""
+    title: str = Field(..., min_length=1, description="Updated conversation title")
+
+
+def create_ui_app(
+    agent: LokiAgent | None = None,
+    storage: ConversationStore | None = None,
+) -> FastAPI:
     """Create and configure the FastAPI application for the LOKI desktop UI."""
     loki_agent = agent or LokiAgent()
+    conv_store = storage or loki_agent.storage
+    if conv_store is None:
+        conv_store = ConversationStore()
+    loki_agent.storage = conv_store
 
     app = FastAPI(
         title="LOKI Desktop Assistant",
@@ -56,6 +82,15 @@ def create_ui_app(agent: LokiAgent | None = None) -> FastAPI:
         docs_url=None,  # Disabled for offline desktop privacy
         redoc_url=None,
     )
+
+    @app.middleware("http")
+    async def add_no_cache_headers(request, call_next):
+        """Prevent browser caching of desktop application UI assets."""
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        return response
 
     @app.get("/api/status")
     def get_status() -> dict[str, Any]:
@@ -108,15 +143,97 @@ def create_ui_app(agent: LokiAgent | None = None) -> FastAPI:
             "cpu_percent": cpu_pct,
             "offline_mode_enforced": loki_agent.config.offline_mode_enforced,
             "history_length": len(loki_agent.get_history()),
+            "active_conversation_id": loki_agent.active_conversation_id,
         }
 
+    # =========================================================================
+    # Conversation History API Endpoints
+    # =========================================================================
+    @app.get("/api/conversations")
+    def list_conversations() -> dict[str, Any]:
+        """List all conversations ordered from most recently active to oldest."""
+        conversations = conv_store.list_conversations()
+        return {"conversations": [c.model_dump() for c in conversations]}
+
+    @app.post("/api/conversations")
+    def create_conversation(req: CreateConversationRequest | None = None) -> dict[str, Any]:
+        """Create a new conversation session and switch to it."""
+        title = (req.title.strip() if req and req.title else None) or "New Chat"
+        summary = conv_store.create_conversation(title=title)
+        loki_agent.switch_conversation(summary.id)
+        return {"conversation": summary.model_dump()}
+
+    @app.get("/api/conversations/{conversation_id}")
+    def get_conversation(conversation_id: str) -> dict[str, Any]:
+        """Fetch detail and full message history for a conversation, switching active context."""
+        detail = conv_store.get_conversation(conversation_id)
+        if not detail:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Conversation '{conversation_id}' not found.",
+            )
+        loki_agent.switch_conversation(conversation_id)
+        return {"conversation": detail.model_dump()}
+
+    @app.patch("/api/conversations/{conversation_id}")
+    def update_conversation(
+        conversation_id: str,
+        req: UpdateConversationRequest,
+    ) -> dict[str, Any]:
+        """Rename an existing conversation."""
+        clean_title = req.title.strip()
+        if not clean_title:
+            raise HTTPException(status_code=400, detail="Conversation title cannot be empty.")
+        updated = conv_store.update_title(conversation_id, clean_title)
+        if not updated:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Conversation '{conversation_id}' not found.",
+            )
+        detail = conv_store.get_conversation(conversation_id)
+        return {
+            "conversation": detail.model_dump() if detail else None,
+            "success": True,
+        }
+
+    @app.delete("/api/conversations/{conversation_id}")
+    def delete_conversation(conversation_id: str) -> dict[str, Any]:
+        """Delete a conversation and all its messages."""
+        deleted = conv_store.delete_conversation(conversation_id)
+        if not deleted:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Conversation '{conversation_id}' not found.",
+            )
+        if loki_agent.active_conversation_id == conversation_id:
+            loki_agent.active_conversation_id = None
+            loki_agent.clear_history()
+        return {
+            "success": True,
+            "message": f"Conversation '{conversation_id}' deleted.",
+        }
+
+    # =========================================================================
+    # Chat & Action Execution Endpoints
+    # =========================================================================
     @app.post("/api/chat")
     def chat(req: ChatRequest) -> dict[str, Any]:
-        """Process user message through LokiAgent."""
+        """Process user message through LokiAgent and persist turn to history."""
+        target_conv_id = req.conversation_id or loki_agent.active_conversation_id
+        if target_conv_id:
+            existing = conv_store.get_conversation(target_conv_id)
+            if not existing:
+                created = conv_store.create_conversation(title="New Chat", conversation_id=target_conv_id)
+                target_conv_id = created.id
+        else:
+            created = conv_store.create_conversation(title="New Chat")
+            target_conv_id = created.id
+
         response = loki_agent.handle_input(
             text=req.message,
             action_id=req.action_id,
             chat_mode=req.chat_mode,
+            conversation_id=target_conv_id,
         )
 
         return {
@@ -131,6 +248,7 @@ def create_ui_app(agent: LokiAgent | None = None) -> FastAPI:
                 else None
             ),
             "metadata": response.metadata,
+            "conversation_id": response.conversation_id or target_conv_id,
         }
 
     @app.post("/api/confirm")
@@ -143,10 +261,11 @@ def create_ui_app(agent: LokiAgent | None = None) -> FastAPI:
                 detail=f"Action ID '{req.action_id}' is invalid, expired, or already consumed.",
             )
 
-        # Execute under gatekeeper with confirmed action_id
+        target_conv_id = req.conversation_id or loki_agent.active_conversation_id
         response = loki_agent.handle_input(
             text=req.original_message,
             action_id=req.action_id,
+            conversation_id=target_conv_id,
         )
 
         return {
@@ -157,6 +276,7 @@ def create_ui_app(agent: LokiAgent | None = None) -> FastAPI:
             "model_used": response.model_used,
             "pending_confirmation": None,
             "metadata": response.metadata,
+            "conversation_id": response.conversation_id or target_conv_id,
         }
 
     @app.post("/api/cancel")
@@ -187,7 +307,14 @@ def create_ui_app(agent: LokiAgent | None = None) -> FastAPI:
         def serve_index() -> FileResponse:
             index_path = STATIC_DIR / "index.html"
             if index_path.exists():
-                return FileResponse(index_path)
+                return FileResponse(
+                    index_path,
+                    headers={
+                        "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+                        "Pragma": "no-cache",
+                        "Expires": "0",
+                    },
+                )
             raise HTTPException(status_code=404, detail="index.html not found")
 
     return app

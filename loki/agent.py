@@ -31,6 +31,7 @@ from .core.types import SafetyConfirmationRequest, ToolResult
 from .llm.client import OllamaClient
 from .llm.resolver import ModelResolver
 from .safety.gatekeeper import SafetyGatekeeper
+from .storage.conversation import ConversationStore
 from .utils.paths import get_config_path
 
 logger = get_logger("agent")
@@ -59,6 +60,7 @@ class AgentResponse(BaseModel):
     )
     model_used: str | None = Field(default=None, description="Name of LLM model used if LLM responded")
     success: bool = Field(default=True, description="Whether the interaction completed successfully")
+    conversation_id: str | None = Field(default=None, description="Active conversation identifier if tracked")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Additional context or diagnostics")
 
 
@@ -74,6 +76,8 @@ class LokiAgent:
         resolver: ModelResolver | None = None,
         system_prompt: str | None = None,
         allow_fallback: bool = False,
+        storage: ConversationStore | None = None,
+        active_conversation_id: str | None = None,
     ) -> None:
         if config is None:
             config_file = get_config_path()
@@ -91,8 +95,30 @@ class LokiAgent:
         self.resolver = resolver or ModelResolver(config=self.config.models, client=self.client)
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         self.allow_fallback = allow_fallback
+        self.storage = storage
+        self.active_conversation_id = active_conversation_id
 
         self._conversation_history: list[dict[str, str]] = []
+        if self.storage and self.active_conversation_id:
+            self.switch_conversation(self.active_conversation_id)
+
+    def switch_conversation(self, conversation_id: str) -> bool:
+        """Switch active conversation, strictly isolating conversational context.
+
+        Invariants:
+        - Clears existing in-memory context before loading new context.
+        - Guarantees zero context bleed across distinct conversations.
+        - Loads strictly the target conversation's chronological turns.
+        """
+        self._conversation_history.clear()
+        self.active_conversation_id = conversation_id
+        if self.storage:
+            detail = self.storage.get_conversation(conversation_id)
+            if not detail:
+                return False
+            self._conversation_history = self.storage.get_context_messages(conversation_id)
+            return True
+        return True
 
     def confirm_action(
         self,
@@ -114,6 +140,8 @@ class LokiAgent:
     def clear_history(self) -> None:
         """Reset conversational context history."""
         self._conversation_history.clear()
+        if self.storage and self.active_conversation_id:
+            self.storage.clear_messages(self.active_conversation_id)
 
     def get_history(self) -> list[dict[str, str]]:
         """Return a copy of the current conversational context history."""
@@ -159,6 +187,7 @@ class LokiAgent:
         text: str,
         action_id: str | None = None,
         chat_mode: bool = True,
+        conversation_id: str | None = None,
     ) -> AgentResponse:
         """Process user input through deterministic routing, falling back to local LLM.
 
@@ -169,14 +198,34 @@ class LokiAgent:
         - If Ollama is offline or model is missing, returns clear diagnostics and NEVER
           triggers unapproved downloads or silent model switches.
         - LLM output is strictly treated as text and never executed as code or commands.
+        - Conversations are strictly isolated: no turns bleed across conversations.
         """
         clean_input = text.strip()
+        effective_conv_id = conversation_id or self.active_conversation_id
+        if not effective_conv_id and self.storage:
+            created = self.storage.create_conversation(title="New Chat")
+            effective_conv_id = created.id
+            self.active_conversation_id = effective_conv_id
+
         if not clean_input:
             return AgentResponse(
                 text="Please provide a command or question.",
                 source=ResponseSource.SYSTEM,
                 success=False,
+                conversation_id=effective_conv_id,
             )
+
+        # Context isolation & conversation persistence setup
+        if effective_conv_id and self.storage:
+            if self.active_conversation_id != effective_conv_id:
+                self.switch_conversation(effective_conv_id)
+
+            detail = self.storage.get_conversation(effective_conv_id)
+            if not detail:
+                self.storage.create_conversation(title="New Chat", conversation_id=effective_conv_id)
+            elif detail.title in ("New Chat", "Untitled Conversation") and len(detail.messages) == 0:
+                auto_title = self.storage.generate_title_from_prompt(clean_input)
+                self.storage.update_title(effective_conv_id, auto_title)
 
         # =========================================================================
         # Stage 0: Deterministic Command Engine (LLM Bypass)
@@ -201,6 +250,7 @@ class LokiAgent:
                     matched_command=route_result.command_name,
                     pending_confirmation=req,
                     success=True,
+                    conversation_id=effective_conv_id,
                     metadata={"action_id": req.action_id},
                 )
 
@@ -212,12 +262,24 @@ class LokiAgent:
                 else:
                     output_text = f"Command failed: {res.error}"
 
+                if self.storage and effective_conv_id:
+                    self.storage.add_message(effective_conv_id, role="user", content=clean_input, source="user")
+                    safe_data = res.data if isinstance(res.data, dict) else {"result": str(res.data)}
+                    self.storage.add_message(
+                        effective_conv_id,
+                        role="assistant",
+                        content=output_text,
+                        source="deterministic",
+                        metadata=safe_data,
+                    )
+
                 return AgentResponse(
                     text=output_text,
                     source=ResponseSource.DETERMINISTIC,
                     matched_command=route_result.command_name,
                     tool_result=res,
                     success=res.success,
+                    conversation_id=effective_conv_id,
                     metadata={"data": res.data},
                 )
 
@@ -233,6 +295,7 @@ class LokiAgent:
                 text=resolution.message,
                 source=ResponseSource.SYSTEM,
                 success=False,
+                conversation_id=effective_conv_id,
                 metadata={
                     "ollama_online": resolution.ollama_online,
                     "installed_models": resolution.installed_models,
@@ -243,28 +306,49 @@ class LokiAgent:
 
         # 2. Local AI Inference
         if chat_mode:
-            self._conversation_history.append({"role": "user", "content": clean_input})
+            if self.storage and effective_conv_id:
+                self.storage.add_message(effective_conv_id, role="user", content=clean_input, source="user")
+                self._conversation_history = self.storage.get_context_messages(effective_conv_id)
+            else:
+                self._conversation_history.append({"role": "user", "content": clean_input})
+
             messages = [{"role": "system", "content": self.system_prompt}] + self._conversation_history
 
             try:
                 reply = self.client.chat(messages, model=effective_model)
-                self._conversation_history.append({"role": "assistant", "content": reply})
+                if self.storage and effective_conv_id:
+                    self.storage.add_message(
+                        effective_conv_id,
+                        role="assistant",
+                        content=reply,
+                        source="llm",
+                        model_used=effective_model,
+                    )
+                    self._conversation_history = self.storage.get_context_messages(effective_conv_id)
+                else:
+                    self._conversation_history.append({"role": "assistant", "content": reply})
+
                 return AgentResponse(
                     text=reply,
                     source=ResponseSource.LLM,
                     model_used=effective_model,
                     success=True,
+                    conversation_id=effective_conv_id,
                     metadata={"using_fallback": resolution.using_fallback},
                 )
             except (ModelNotFoundError, ModelInferenceError, ModelOutputParseError, ModelFallbackError) as e:
-                # Rollback user message from context to prevent poisoned history
-                self._conversation_history.pop()
+                # Rollback or reload context to prevent poisoned history
+                if self.storage and effective_conv_id:
+                    self._conversation_history = self.storage.get_context_messages(effective_conv_id)
+                else:
+                    self._conversation_history.pop()
                 logger.error("Local LLM chat failed: %s", e)
                 return AgentResponse(
                     text=f"AI inference error: {e}",
                     source=ResponseSource.SYSTEM,
                     model_used=effective_model,
                     success=False,
+                    conversation_id=effective_conv_id,
                     metadata={"error": str(e)},
                 )
         else:
@@ -274,11 +358,22 @@ class LokiAgent:
                     model=effective_model,
                     system=self.system_prompt,
                 )
+                if self.storage and effective_conv_id:
+                    self.storage.add_message(effective_conv_id, role="user", content=clean_input, source="user")
+                    self.storage.add_message(
+                        effective_conv_id,
+                        role="assistant",
+                        content=reply,
+                        source="llm",
+                        model_used=effective_model,
+                    )
+
                 return AgentResponse(
                     text=reply,
                     source=ResponseSource.LLM,
                     model_used=effective_model,
                     success=True,
+                    conversation_id=effective_conv_id,
                     metadata={"using_fallback": resolution.using_fallback},
                 )
             except (ModelNotFoundError, ModelInferenceError, ModelOutputParseError, ModelFallbackError) as e:
@@ -288,5 +383,6 @@ class LokiAgent:
                     source=ResponseSource.SYSTEM,
                     model_used=effective_model,
                     success=False,
+                    conversation_id=effective_conv_id,
                     metadata={"error": str(e)},
                 )

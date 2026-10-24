@@ -23,6 +23,7 @@ import uvicorn
 
 from ..agent import LokiAgent
 from ..core.logging import get_logger
+from ..utils.paths import get_data_dir
 from .server import create_ui_app
 
 logger = get_logger("ui.launcher")
@@ -71,17 +72,29 @@ def _find_app_browser() -> tuple[str | None, str]:
     return None, "system_default"
 
 
-def launch_desktop_window(url: str, width: int = 1240, height: int = 820) -> subprocess.Popen[Any] | None:
+def launch_desktop_window(
+    url: str,
+    width: int = 1240,
+    height: int = 820,
+    profile_dir: Path | None = None,
+) -> subprocess.Popen[Any] | None:
     """Open the local UI in a standalone desktop application window."""
     browser_exe, browser_type = _find_app_browser()
 
     if browser_exe and browser_type in ("edge", "chrome"):
         logger.info("Opening LOKI in desktop application window via %s", browser_type)
+        if profile_dir is None:
+            profile_dir = get_data_dir() / "browser_profile"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
         args = [
             browser_exe,
             f"--app={url}",
             f"--window-size={width},{height}",
             "--new-window",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
         ]
         try:
             return subprocess.Popen(args)
