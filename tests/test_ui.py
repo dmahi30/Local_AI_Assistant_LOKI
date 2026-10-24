@@ -28,8 +28,10 @@ from loki.ui.server import (
 
 
 @pytest.fixture
-def mock_agent() -> LokiAgent:
-    """Fixture providing a mock LokiAgent for UI tests."""
+def mock_agent(tmp_path: Path) -> LokiAgent:
+    """Fixture providing a mock LokiAgent for UI tests with an isolated test store."""
+    from loki.storage import ConversationStore
+
     mock_client = MagicMock(spec=OllamaClient)
     mock_client.host = "http://127.0.0.1:11434"
     mock_client.check_health.return_value = True
@@ -38,7 +40,8 @@ def mock_agent() -> LokiAgent:
     mock_client.is_model_available.return_value = True
     mock_client.chat.return_value = "Mocked conversational response from LOKI."
 
-    agent = LokiAgent(client=mock_client)
+    store = ConversationStore(db_path=tmp_path / "mock_agent_ui.db")
+    agent = LokiAgent(client=mock_client, storage=store)
     return agent
 
 
@@ -434,3 +437,118 @@ def test_ui_status_detects_fallback_model_when_enabled():
             assert status["using_fallback"] is True
             assert status["effective_model"] == "qwen2.5:1.5b"
             break
+
+
+def test_create_ui_app_isolated_from_real_database(tmp_path: Path):
+    """Regression test: verify create_ui_app cannot write conversations to the real user database."""
+    from loki.storage import ConversationStore
+    from loki.utils.paths import get_default_app_dir, get_data_dir
+
+    real_db_path = get_default_app_dir() / "data" / "loki.db"
+
+    # Capture real database state before test
+    real_db_exists = real_db_path.exists()
+    real_db_size = real_db_path.stat().st_size if real_db_exists else 0
+    real_db_mtime = real_db_path.stat().st_mtime if real_db_exists else 0
+
+    mock_client = MagicMock(spec=OllamaClient)
+    mock_client.chat.return_value = "Isolated response."
+
+    # Create app without explicit storage - should use isolated LOKI_HOME
+    agent = LokiAgent(client=mock_client)
+    app = create_ui_app(agent=agent)
+
+    # Invariant: storage is NOT pointing to the real user database
+    assert agent.storage is not None
+    assert agent.storage.db_path != real_db_path
+    assert str(get_data_dir()) in str(agent.storage.db_path)
+
+    # Execute a chat turn
+    for route in app.routes:
+        if getattr(route, "path", None) == "/api/chat":
+            route.endpoint(ChatRequest(message="Isolation verification test prompt"))
+            break
+
+    # Verify conversation was written to isolated test store, NOT the real db
+    isolated_convs = agent.storage.list_conversations()
+    assert len(isolated_convs) == 1
+    assert isolated_convs[0].title == "Isolation verification test prompt"
+
+    # Invariant: Real user database was completely untouched
+    if real_db_exists:
+        assert real_db_path.stat().st_size == real_db_size
+        assert real_db_path.stat().st_mtime == real_db_mtime
+
+
+def test_run_desktop_ui_reuses_existing_instance(mock_agent):
+    """Verify run_desktop_ui detects already-healthy local instance and avoids duplicate server thread."""
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.__enter__.return_value = mock_resp
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        with patch("loki.ui.launcher.launch_desktop_window") as mock_launch:
+            with patch("uvicorn.Server.run") as mock_server_run:
+                result = run_desktop_ui(agent=mock_agent, port=None, open_window=True)
+                assert result is True
+                # Existing server was reused, new uvicorn server was NOT spawned
+                mock_server_run.assert_not_called()
+                mock_launch.assert_called_once_with("http://127.0.0.1:11435")
+
+
+def test_loki_home_override_preserves_real_database(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Regression test: verify that deliberately setting LOKI_HOME points all storage to that directory and leaves the real database untouched."""
+    from loki.storage import ConversationStore
+    from loki.utils.paths import get_default_app_dir, get_data_dir
+
+    real_db_path = get_default_app_dir() / "data" / "loki.db"
+    real_db_exists = real_db_path.exists()
+    real_db_size = real_db_path.stat().st_size if real_db_exists else 0
+    real_db_mtime = real_db_path.stat().st_mtime if real_db_exists else 0
+
+    custom_dir = tmp_path / "custom_loki_env"
+    monkeypatch.setenv("LOKI_HOME", str(custom_dir))
+
+    # Assert get_data_dir strictly follows the overridden LOKI_HOME
+    expected_data_dir = custom_dir / "data"
+    assert get_data_dir() == expected_data_dir
+
+    # Default-initialized ConversationStore must write to custom_dir/data/loki.db
+    store = ConversationStore()
+    assert store.db_path == expected_data_dir / "loki.db"
+
+    # Add conversations and messages
+    conv = store.create_conversation("Override Verification Chat")
+    store.add_message(conv.id, role="user", content="Test message in custom LOKI_HOME")
+    store.add_message(conv.id, role="assistant", content="Response in custom LOKI_HOME")
+
+    # Invariant: Data is present in custom directory
+    detail = store.get_conversation(conv.id)
+    assert detail is not None
+    assert len(detail.messages) == 2
+
+    # Invariant: Real user database at %LOCALAPPDATA%\LOKI\data\loki.db was NOT touched
+    if real_db_exists:
+        assert real_db_path.stat().st_size == real_db_size
+        assert real_db_path.stat().st_mtime == real_db_mtime
+
+
+def test_run_desktop_ui_reuses_instance_on_arbitrary_port_via_server_info(mock_agent):
+    """Verify run_desktop_ui detects running instance on an arbitrary port via server.json metadata."""
+    from loki.ui.launcher import _write_server_info
+
+    # Simulate an existing server running on dynamic ephemeral port 54321
+    _write_server_info("http://127.0.0.1:54321", 54321)
+
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.__enter__.return_value = mock_resp
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        with patch("loki.ui.launcher.launch_desktop_window") as mock_launch:
+            with patch("uvicorn.Server.run") as mock_server_run:
+                result = run_desktop_ui(agent=mock_agent, port=None, open_window=True)
+                assert result is True
+                # Reused dynamic port instance, avoided starting second server
+                mock_server_run.assert_not_called()
+                mock_launch.assert_called_once_with("http://127.0.0.1:54321")

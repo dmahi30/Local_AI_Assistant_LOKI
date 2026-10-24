@@ -520,3 +520,137 @@ def test_app_js_readystatus_resilience_and_error_handling():
     assert "safeDesc" in content
     assert "safeTargets" in content
     assert "safeActionId" in content
+
+
+def test_app_js_delete_conversation_error_handling():
+    """Verify app.js deleteConversation inspects res.ok, surfaces errors, and cleans up active UI state."""
+    app_js_path = Path(__file__).resolve().parent.parent / "loki" / "ui" / "static" / "app.js"
+    content = app_js_path.read_text(encoding="utf-8")
+
+    # Invariant: Checks res.ok and does not silently ignore non-2xx failures
+    assert "deleteConversation(convId, title)" in content
+    assert "res.ok" in content
+    assert "Could not delete conversation" in content
+    assert "alert(" in content
+
+    # Invariant: Cleans up active chat stream and shows empty state when deleting active chat
+    assert 'chatStream.innerHTML = ""' in content
+    assert 'emptyState.style.display = "flex"' in content
+
+
+def test_ui_conversations_delete_nonexistent_returns_404_detail(mock_agent_and_store):
+    """Verify DELETE /api/conversations/{unknown_id} returns HTTP 404 with clear error detail."""
+    agent, store = mock_agent_and_store
+    app = create_ui_app(agent=agent, storage=store)
+
+    delete_fn = None
+    for route in app.routes:
+        if getattr(route, "path", None) == "/api/conversations/{conversation_id}" and "DELETE" in getattr(route, "methods", set()):
+            delete_fn = route.endpoint
+            break
+
+    assert delete_fn is not None
+    with pytest.raises(HTTPException) as exc_info:
+        delete_fn("non_existent_id_9999")
+    assert exc_info.value.status_code == 404
+    assert "non_existent_id_9999" in exc_info.value.detail
+
+
+def test_conversation_deletion_behavioral_success_and_failure(mock_agent_and_store):
+    """Behavioral test for conversation deletion success and failure paths.
+
+    Architecture Note:
+    LOKI's desktop interface runs inside Microsoft Edge in application mode
+    (--app=http://127.0.0.1:<port>). Automated browser drivers (Selenium/Playwright)
+    are intentionally excluded to preserve a minimal, offline-first Python footprint.
+    This behavioral test validates the complete full-stack API contract, HTTP status
+    codes, error detail payloads, cascading SQLite persistence, and agent state resets.
+    DOM and alert interactions in app.js are verified via static JavaScript contracts
+    and documented manual QA procedures.
+    """
+    agent, store = mock_agent_and_store
+    app = create_ui_app(agent=agent, storage=store)
+
+    create_fn = None
+    chat_fn = None
+    delete_fn = None
+    list_fn = None
+    get_fn = None
+    for route in app.routes:
+        p = getattr(route, "path", None)
+        methods = getattr(route, "methods", set())
+        if p == "/api/conversations" and "POST" in methods:
+            create_fn = route.endpoint
+        elif p == "/api/conversations" and "GET" in methods:
+            list_fn = route.endpoint
+        elif p == "/api/conversations/{conversation_id}" and "GET" in methods:
+            get_fn = route.endpoint
+        elif p == "/api/conversations/{conversation_id}" and "DELETE" in methods:
+            delete_fn = route.endpoint
+        elif p == "/api/chat" and "POST" in methods:
+            chat_fn = route.endpoint
+
+    # 1. Setup: Create two conversations (A and B) with turns
+    conv_a = create_fn(CreateConversationRequest(title="Alpha Chat"))["conversation"]["id"]
+    chat_fn(ChatRequest(message="Alpha turn 1", conversation_id=conv_a))
+    chat_fn(ChatRequest(message="Alpha turn 2", conversation_id=conv_a))
+
+    conv_b = create_fn(CreateConversationRequest(title="Beta Chat"))["conversation"]["id"]
+    chat_fn(ChatRequest(message="Beta turn 1", conversation_id=conv_b))
+
+    # Verify both conversations exist with messages
+    assert len(list_fn()["conversations"]) == 2
+    assert len(get_fn(conv_a)["conversation"]["messages"]) == 4  # 2 user + 2 assistant
+    assert len(get_fn(conv_b)["conversation"]["messages"]) == 2
+
+    # Switch agent active context to Alpha
+    agent.switch_conversation(conv_a)
+    assert agent.active_conversation_id == conv_a
+
+    # 2. SUCCESS PATH: Delete active conversation Alpha
+    del_res = delete_fn(conv_a)
+    assert del_res["success"] is True
+    assert conv_a in del_res["message"]
+
+    # Invariant: Active conversation is reset and history cleared
+    assert agent.active_conversation_id is None
+    assert agent.get_history() == []
+
+    # Invariant: Alpha is permanently removed from storage and cascade deleted
+    assert store.get_conversation(conv_a) is None
+    with store._get_connection() as conn:
+        alpha_msgs = conn.execute("SELECT COUNT(*) FROM messages WHERE conversation_id = ?", (conv_a,)).fetchone()[0]
+        assert alpha_msgs == 0
+
+    # Invariant: Listing now only returns Beta
+    remaining = list_fn()["conversations"]
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == conv_b
+
+    # Invariant: Direct GET on Alpha returns 404
+    with pytest.raises(HTTPException) as exc_get:
+        get_fn(conv_a)
+    assert exc_get.value.status_code == 404
+
+    # 3. FAILURE PATH 1: Delete non-existent ID
+    with pytest.raises(HTTPException) as exc_del:
+        delete_fn("non-existent-conv-id-xyz")
+    assert exc_del.value.status_code == 404
+    assert "non-existent-conv-id-xyz" in exc_del.value.detail
+
+    # Invariant: Beta remains untouched after failed deletion
+    detail_b = get_fn(conv_b)["conversation"]
+    assert detail_b["id"] == conv_b
+    assert len(detail_b["messages"]) == 2
+
+    # 4. FAILURE PATH 2: Storage failure propagation
+    from unittest.mock import patch
+    from loki.core.exceptions import StorageError
+
+    with patch.object(store, "delete_conversation", side_effect=StorageError("Simulated lock timeout")):
+        with pytest.raises(StorageError) as exc_storage:
+            delete_fn(conv_b)
+        assert "Simulated lock timeout" in str(exc_storage.value)
+
+    # Invariant: Beta conversation survives aborted/failed deletion
+    assert store.get_conversation(conv_b) is not None

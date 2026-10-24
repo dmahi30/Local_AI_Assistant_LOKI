@@ -8,6 +8,7 @@ Launches the local UI server and opens a dedicated, chrome-free desktop applicat
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import socket
@@ -148,6 +149,66 @@ def wait_for_server_ready(
     return False
 
 
+def _probe_loki_server(url: str, timeout: float = 0.3) -> bool:
+    """Check if a healthy LOKI UI server is responsive at the specified URL."""
+    try:
+        req = urllib.request.Request(
+            f"{url.rstrip('/')}/api/status",
+            headers={"User-Agent": "LokiInstanceCheck/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def _get_server_info_path() -> Path:
+    """Return path to the active server metadata file."""
+    return get_data_dir() / "server.json"
+
+
+def _read_active_server_info() -> dict[str, Any] | None:
+    """Read active server metadata if the recorded instance is still alive."""
+    info_path = _get_server_info_path()
+    if not info_path.exists():
+        return None
+    try:
+        data = json.loads(info_path.read_text(encoding="utf-8"))
+        url = data.get("url")
+        if url and _probe_loki_server(url):
+            return data
+        info_path.unlink(missing_ok=True)
+    except Exception:
+        try:
+            info_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return None
+
+
+def _write_server_info(url: str, port: int) -> None:
+    """Persist active server metadata for single-instance discovery."""
+    try:
+        info_path = _get_server_info_path()
+        info_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"url": url, "port": port, "pid": os.getpid()}
+        info_path.write_text(json.dumps(payload), encoding="utf-8")
+    except Exception as e:
+        logger.debug("Could not write server info file: %s", e)
+
+
+def _clear_server_info() -> None:
+    """Remove server metadata file if it belongs to this process."""
+    try:
+        info_path = _get_server_info_path()
+        if info_path.exists():
+            data = json.loads(info_path.read_text(encoding="utf-8"))
+            if data.get("pid") == os.getpid():
+                info_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def run_desktop_ui(
     agent: LokiAgent | None = None,
     port: int | None = None,
@@ -165,6 +226,22 @@ def run_desktop_ui(
     Returns:
         True if server started successfully and ran, False if startup failed.
     """
+    # Single-instance detection: check for active server via metadata file or default port
+    if port is None:
+        active_info = _read_active_server_info()
+        active_url = active_info.get("url") if active_info else None
+
+        # Fallback probe to default port if metadata file was absent or not yet created
+        if not active_url and _probe_loki_server("http://127.0.0.1:11435"):
+            active_url = "http://127.0.0.1:11435"
+
+        if active_url:
+            logger.info("Existing LOKI UI server is already active at %s", active_url)
+            print(f"\n[INFO] LOKI Desktop UI is already active at {active_url}.", flush=True)
+            if open_window:
+                launch_desktop_window(active_url)
+            return True
+
     target_port = port if port is not None else find_free_port()
     app = create_ui_app(agent=agent)
     url = f"http://127.0.0.1:{target_port}"
@@ -206,6 +283,7 @@ def run_desktop_ui(
         return False
 
     logger.info("LOKI Desktop UI is active at %s", url)
+    _write_server_info(url, target_port)
 
     proc: subprocess.Popen[Any] | None = None
     if open_window:
@@ -241,6 +319,7 @@ def run_desktop_ui(
     except KeyboardInterrupt:
         logger.info("Shutting down LOKI UI on user interrupt...")
     finally:
+        _clear_server_info()
         server.should_exit = True
         server_thread.join(timeout=3.0)
         logger.info("LOKI UI server shut down cleanly.")

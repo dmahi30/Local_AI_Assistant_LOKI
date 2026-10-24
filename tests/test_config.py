@@ -1,9 +1,10 @@
 """Tests for configuration persistence, defaults, and tier profiles."""
 
 from pathlib import Path
+from pydantic import ValidationError
 import pytest
 
-from loki.core.config import LokiConfig
+from loki.core.config import LokiConfig, ModelRuntimeConfig
 from loki.core.exceptions import ConfigurationError
 from loki.core.types import ExecutionDevice, HardwareTier
 
@@ -53,3 +54,37 @@ def test_corrupted_config_handling(temp_loki_dir: Path):
 
     with pytest.raises(ConfigurationError):
         LokiConfig.load(bad_file, base_dir=temp_loki_dir)
+
+
+def test_model_runtime_config_validation_bounds():
+    """Verify runtime validation bounds on repeat_penalty, top_p, num_predict, context_length."""
+    # Valid defaults
+    cfg = ModelRuntimeConfig()
+    assert cfg.repeat_penalty == 1.18
+    assert cfg.top_p == 0.85
+    assert cfg.num_predict == 512
+    assert cfg.context_length == 4096
+
+    # repeat_penalty ge=1.0, le=2.0
+    with pytest.raises(ValidationError):
+        ModelRuntimeConfig(repeat_penalty=0.5)
+    with pytest.raises(ValidationError):
+        ModelRuntimeConfig(repeat_penalty=2.5)
+
+    # top_p ge=0.0, le=1.0
+    with pytest.raises(ValidationError):
+        ModelRuntimeConfig(top_p=-0.1)
+    with pytest.raises(ValidationError):
+        ModelRuntimeConfig(top_p=1.5)
+
+    # num_predict ge=16, le=4096
+    with pytest.raises(ValidationError):
+        ModelRuntimeConfig(num_predict=5)
+    with pytest.raises(ValidationError):
+        ModelRuntimeConfig(num_predict=10000)
+
+    # context_length ge=512, le=131072
+    with pytest.raises(ValidationError):
+        ModelRuntimeConfig(context_length=100)
+    with pytest.raises(ValidationError):
+        ModelRuntimeConfig(context_length=200000)

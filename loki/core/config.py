@@ -37,9 +37,18 @@ class ModelRuntimeConfig(BaseModel):
     fallback_models: list[str] = Field(default_factory=list, description="Ordered fallbacks")
     embedding_model: str = Field(default="nomic-embed-text", description="Local embedding model")
     ollama_host: str = Field(default="http://127.0.0.1:11434", description="Local Ollama HTTP endpoint")
-    context_length: int = Field(default=32768, description="Active context token window")
+    context_length: int = Field(default=4096, ge=512, le=131072, description="Active context token window (num_ctx)")
     execution_device: ExecutionDevice = Field(default=ExecutionDevice.CPU, description="Inference device")
     temperature: float = Field(default=0.2, ge=0.0, le=1.0)
+    top_p: float = Field(default=0.85, ge=0.0, le=1.0, description="Nucleus sampling probability threshold")
+    repeat_penalty: float = Field(default=1.18, ge=1.0, le=2.0, description="Repetition penalty parameter")
+    num_predict: int = Field(default=512, ge=16, le=4096, description="Maximum number of tokens to predict")
+    max_history_messages: int = Field(
+        default=20,
+        ge=2,
+        le=200,
+        description="Maximum conversational turns to retain in LLM context prompt",
+    )
     timeout_seconds: int = Field(default=60, ge=5, le=300)
 
 
@@ -135,28 +144,28 @@ class LokiConfig(BaseModel):
             config.models.active_model = "qwen2.5:1.5b"
             config.models.fallback_models = []
             config.models.execution_device = ExecutionDevice.CPU
-            config.models.context_length = 16384
+            config.models.context_length = 4096
             config.voice.whisper_model = "tiny.en"
 
         elif tier == HardwareTier.BALANCED_CPU:
             config.models.active_model = "qwen2.5:3b"
             config.models.fallback_models = ["qwen2.5:1.5b"]
             config.models.execution_device = ExecutionDevice.CPU
-            config.models.context_length = 32768
+            config.models.context_length = 8192
             config.voice.whisper_model = "base.en"
 
         elif tier == HardwareTier.BALANCED_GPU:
             config.models.active_model = "qwen2.5:7b"
             config.models.fallback_models = ["qwen2.5:3b", "qwen2.5:1.5b"]
             config.models.execution_device = ExecutionDevice.GPU
-            config.models.context_length = 32768
+            config.models.context_length = 8192
             config.voice.whisper_model = "base.en"
 
         elif tier == HardwareTier.POWER:
             config.models.active_model = "qwen2.5:7b"
             config.models.fallback_models = ["qwen2.5:3b"]
             config.models.execution_device = ExecutionDevice.GPU
-            config.models.context_length = 65536
+            config.models.context_length = 16384
             config.voice.whisper_model = "small.en"
 
         return config

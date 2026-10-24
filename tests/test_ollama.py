@@ -181,6 +181,142 @@ def test_generate_with_fallback_all_fail():
         assert "All configured models failed" in str(exc_info.value)
 
 
+def test_generate_and_chat_options_payload_inspection():
+    """Verify that generate and chat pass configured runtime options in the outgoing payload."""
+    client = OllamaClient()
+
+    # 1. Test generate outgoing payload options
+    captured_reqs = []
+
+    def fake_urlopen_generate(req, **kwargs):
+        captured_reqs.append(req)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"response": "Generated output"}).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        return mock_resp
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen_generate):
+        client.generate("Test prompt")
+
+    assert len(captured_reqs) == 1
+    gen_body = json.loads(captured_reqs[0].data.decode("utf-8"))
+    assert gen_body["prompt"] == "Test prompt"
+    assert gen_body["stream"] is False
+    assert "options" in gen_body
+    opts = gen_body["options"]
+    assert opts["temperature"] == 0.2
+    assert opts["top_p"] == 0.85
+    assert opts["repeat_penalty"] == 1.18
+    assert opts["num_predict"] == 512
+    assert opts["num_ctx"] == 4096
+
+    # 2. Test chat outgoing payload options
+    captured_reqs.clear()
+
+    def fake_urlopen_chat(req, **kwargs):
+        captured_reqs.append(req)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "message": {"role": "assistant", "content": "Chat reply"}
+        }).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        return mock_resp
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen_chat):
+        client.chat([{"role": "user", "content": "Hi"}])
+
+    assert len(captured_reqs) == 1
+    chat_body = json.loads(captured_reqs[0].data.decode("utf-8"))
+    assert chat_body["messages"] == [{"role": "user", "content": "Hi"}]
+    assert chat_body["stream"] is False
+    assert "options" in chat_body
+    chat_opts = chat_body["options"]
+    assert chat_opts["temperature"] == 0.2
+    assert chat_opts["top_p"] == 0.85
+    assert chat_opts["repeat_penalty"] == 1.18
+    assert chat_opts["num_predict"] == 512
+    assert chat_opts["num_ctx"] == 4096
+
+
+def test_generate_and_chat_custom_options_override():
+    """Verify that passing explicit options overrides defaults while keeping unspecified defaults."""
+    client = OllamaClient()
+    captured_reqs = []
+
+    def fake_urlopen(req, **kwargs):
+        captured_reqs.append(req)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"response": "Custom output"}).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        return mock_resp
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        client.generate(
+            "Prompt",
+            options={"temperature": 0.7, "repeat_penalty": 1.25, "num_predict": 256},
+        )
+
+    assert len(captured_reqs) == 1
+    body = json.loads(captured_reqs[0].data.decode("utf-8"))
+    opts = body["options"]
+    assert opts["temperature"] == 0.7
+    assert opts["repeat_penalty"] == 1.25
+    assert opts["num_predict"] == 256
+    # Unspecified options retain configured defaults
+    assert opts["top_p"] == 0.85
+    assert opts["num_ctx"] == 4096
+
+
+def test_chat_with_fallback_success():
+    """Verify chat_with_fallback cascades through candidate models and returns (response, model_used)."""
+    cfg = ModelRuntimeConfig(
+        active_model="primary-missing:latest",
+        fallback_models=["fallback-ready:latest"],
+    )
+    client = OllamaClient(cfg)
+
+    err_404 = urllib.error.HTTPError(
+        url="http://127.0.0.1:11434/api/chat",
+        code=404,
+        msg="Not Found",
+        hdrs={},
+        fp=MagicMock(read=lambda: b'{"error":"model not found"}'),
+    )
+
+    mock_resp_success = MagicMock()
+    mock_resp_success.read.return_value = json.dumps({
+        "message": {"role": "assistant", "content": "Chat fallback response."}
+    }).encode("utf-8")
+    mock_resp_success.__enter__.return_value = mock_resp_success
+
+    with patch("urllib.request.urlopen", side_effect=[err_404, mock_resp_success]):
+        response, used_model = client.chat_with_fallback([{"role": "user", "content": "Test"}])
+        assert response == "Chat fallback response."
+        assert used_model == "fallback-ready:latest"
+
+
+def test_chat_with_fallback_all_fail():
+    """Verify chat_with_fallback raises ModelFallbackError if all models in cascade fail."""
+    cfg = ModelRuntimeConfig(
+        active_model="model-a:latest",
+        fallback_models=["model-b:latest"],
+    )
+    client = OllamaClient(cfg)
+
+    err = urllib.error.HTTPError(
+        url="http://127.0.0.1:11434/api/chat",
+        code=404,
+        msg="Not Found",
+        hdrs={},
+        fp=MagicMock(read=lambda: b'{"error":"model not found"}'),
+    )
+
+    with patch("urllib.request.urlopen", side_effect=[err, err]):
+        with pytest.raises(ModelFallbackError) as exc_info:
+            client.chat_with_fallback([{"role": "user", "content": "Test"}])
+        assert "All configured models failed for chat completion" in str(exc_info.value)
+
+
 # =========================================================================
 # Phase 4 Hardening Regression Tests
 # =========================================================================

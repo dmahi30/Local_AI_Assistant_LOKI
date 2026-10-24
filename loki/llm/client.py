@@ -325,6 +325,19 @@ class OllamaClient:
                 return True
         return False
 
+    def _build_options(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Construct validated options dictionary for Ollama inference."""
+        opts: dict[str, Any] = {
+            "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
+            "repeat_penalty": self.config.repeat_penalty,
+            "num_predict": self.config.num_predict,
+            "num_ctx": self.config.context_length,
+        }
+        if overrides:
+            opts.update(overrides)
+        return opts
+
     def generate(
         self,
         prompt: str,
@@ -343,13 +356,7 @@ class OllamaClient:
         if system:
             payload["system"] = system
 
-        opts = {
-            "temperature": self.config.temperature,
-            "num_ctx": self.config.context_length,
-        }
-        if options:
-            opts.update(options)
-        payload["options"] = opts
+        payload["options"] = self._build_options(options)
 
         res = self._make_request("/api/generate", data=payload, timeout=timeout)
         if "response" not in res:
@@ -381,13 +388,7 @@ class OllamaClient:
             "stream": False,
         }
 
-        opts = {
-            "temperature": self.config.temperature,
-            "num_ctx": self.config.context_length,
-        }
-        if options:
-            opts.update(options)
-        payload["options"] = opts
+        payload["options"] = self._build_options(options)
 
         res = self._make_request("/api/chat", data=payload, timeout=timeout)
         if "message" not in res:

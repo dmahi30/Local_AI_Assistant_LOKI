@@ -223,3 +223,47 @@ def test_agent_clear_history(mock_ollama_client):
     assert len(agent.get_history()) == 2
     agent.clear_history()
     assert len(agent.get_history()) == 0
+
+
+def test_agent_system_prompt_structure_and_constraints():
+    """Verify DEFAULT_SYSTEM_PROMPT adheres to Phase 7C directness and safety guidelines."""
+    from loki.agent import DEFAULT_SYSTEM_PROMPT
+
+    # 1. Directness and conciseness
+    assert "direct, accurate, and concise" in DEFAULT_SYSTEM_PROMPT
+    assert "Avoid conversational filler" in DEFAULT_SYSTEM_PROMPT
+    assert "Avoid repeating sentences" in DEFAULT_SYSTEM_PROMPT
+
+    # 2. Uncertainty handling
+    assert "state so concisely rather than guessing" in DEFAULT_SYSTEM_PROMPT
+
+    # 3. Separation of tools: LLM must not claim to execute OS tools
+    assert "do not claim to execute operating system commands" in DEFAULT_SYSTEM_PROMPT
+    assert "handled deterministically outside the LLM" in DEFAULT_SYSTEM_PROMPT
+
+
+def test_agent_bounded_context_in_prompt_assembly(mock_ollama_client):
+    """Verify LokiAgent enforces max_history_messages in LLM prompt assembly."""
+    cfg = LokiConfig()
+    cfg.models.max_history_messages = 4
+
+    agent = LokiAgent(config=cfg, client=mock_ollama_client)
+
+    # Execute 3 sequential turns (would be 6 messages in history)
+    for i in range(1, 4):
+        mock_ollama_client.chat.return_value = f"Answer {i}"
+        agent.handle_input(f"Question {i}")
+
+    # Inspect the last call to client.chat
+    last_call = mock_ollama_client.chat.call_args[0][0]
+    # First message must be system prompt
+    assert last_call[0]["role"] == "system"
+    assert "LOKI" in last_call[0]["content"]
+
+    # History turns must be bounded to <= 4 turns, ending with newest Question 3
+    history_turns = last_call[1:]
+    assert len(history_turns) <= 4
+    assert history_turns[-1]["role"] == "user"
+    assert history_turns[-1]["content"] == "Question 3"
+    # Ensure it starts on a user turn
+    assert history_turns[0]["role"] == "user"

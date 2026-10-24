@@ -185,3 +185,149 @@ def test_generate_title_from_prompt():
     title = ConversationStore.generate_title_from_prompt(long_prompt, max_length=35)
     assert len(title) <= 38  # 35 + ...
     assert title.endswith("...")
+
+
+def test_context_messages_sliding_window_and_turn_boundaries(temp_store: ConversationStore):
+    """Verify sliding-window limits context size, preserves turn boundaries, and keeps SQLite records intact."""
+    conv = temp_store.create_conversation(title="Sliding Window Test")
+
+    # Add 4 conversational turns (8 messages)
+    for i in range(1, 5):
+        temp_store.add_message(conv.id, role="user", content=f"User question {i}")
+        temp_store.add_message(conv.id, role="assistant", content=f"Assistant answer {i}")
+
+    # Verify SQLite has all 8 messages
+    detail_full = temp_store.get_conversation(conv.id)
+    assert len(detail_full.messages) == 8
+
+    # 1. Fetch with max_messages=4 -> Should return [U3, A3, U4, A4]
+    ctx_4 = temp_store.get_context_messages(conv.id, max_messages=4)
+    assert len(ctx_4) == 4
+    assert ctx_4[0] == {"role": "user", "content": "User question 3"}
+    assert ctx_4[1] == {"role": "assistant", "content": "Assistant answer 3"}
+    assert ctx_4[2] == {"role": "user", "content": "User question 4"}
+    assert ctx_4[3] == {"role": "assistant", "content": "Assistant answer 4"}
+
+    # 2. Fetch with max_messages=3 -> Naive slice is [A3, U4, A4]; turn boundary trims A3 -> [U4, A4]
+    ctx_3 = temp_store.get_context_messages(conv.id, max_messages=3)
+    assert len(ctx_3) == 2
+    assert ctx_3[0] == {"role": "user", "content": "User question 4"}
+    assert ctx_3[1] == {"role": "assistant", "content": "Assistant answer 4"}
+
+    # 3. CRITICAL INVARIANT: SQLite database records must be 100% preserved
+    detail_after = temp_store.get_conversation(conv.id)
+    assert len(detail_after.messages) == 8
+    assert [m.content for m in detail_after.messages] == [
+        "User question 1", "Assistant answer 1",
+        "User question 2", "Assistant answer 2",
+        "User question 3", "Assistant answer 3",
+        "User question 4", "Assistant answer 4",
+    ]
+
+
+def test_context_messages_deterministic_tool_bounding(temp_store: ConversationStore):
+    """Verify deterministic command output is bounded in LLM prompt context without altering SQLite storage."""
+    conv = temp_store.create_conversation(title="Tool Output Test")
+
+    long_tool_output = "Line 1: Found file C:\\path\\to\\file.txt\n" * 40  # ~1600 characters
+    temp_store.add_message(conv.id, role="user", content="search files")
+    temp_store.add_message(
+        conv.id,
+        role="assistant",
+        content=long_tool_output,
+        source="deterministic",
+    )
+
+    # Context prompt should truncate long tool output
+    ctx = temp_store.get_context_messages(conv.id, max_tool_chars=150)
+    assert len(ctx) == 2
+    assert ctx[0]["content"] == "search files"
+    assert len(ctx[1]["content"]) < 250
+    assert "[Command output truncated for context]" in ctx[1]["content"]
+
+    # Database record must preserve full raw output untouched
+    detail = temp_store.get_conversation(conv.id)
+    assert len(detail.messages[1].content) == len(long_tool_output)
+    assert "[Command output truncated for context]" not in detail.messages[1].content
+
+
+# =========================================================================
+# Connection Lifecycle & Persistence Regression Tests
+# =========================================================================
+
+def test_connection_lifecycle_closes_on_success(tmp_path: Path):
+    """Verify SQLite connection is closed after operation and does not lock file on Windows."""
+    db_file = tmp_path / "lifecycle_success.db"
+    store = ConversationStore(db_path=db_file)
+
+    # Perform normal writes
+    conv = store.create_conversation("Lock Test")
+    store.add_message(conv.id, role="user", content="Hello lock check")
+    store.add_message(conv.id, role="assistant", content="Echo lock check")
+
+    # If connection was leaked, opening in exclusive mode or deleting/moving the file would fail on Windows
+    assert db_file.exists()
+    # Test file can be opened in write/exclusive mode or renamed
+    renamed_file = tmp_path / "lifecycle_success_renamed.db"
+    db_file.rename(renamed_file)
+    assert renamed_file.exists()
+
+
+def test_connection_lifecycle_rollback_on_exception(tmp_path: Path):
+    """Verify transaction rolls back and connection is closed when an error occurs."""
+    db_file = tmp_path / "lifecycle_rollback.db"
+    store = ConversationStore(db_path=db_file)
+    conv = store.create_conversation("Rollback Test")
+
+    # Attempt an invalid operation inside transaction
+    with pytest.raises(Exception):
+        with store._get_connection() as conn:
+            conn.execute(
+                "INSERT INTO messages (conversation_id, role, content, source, created_at) VALUES (?, ?, ?, ?, ?)",
+                (conv.id, "user", "Rollback message", "user", "2026-01-01T00:00:00Z"),
+            )
+            # Deliberately raise error before block exits
+            raise RuntimeError("Forced transaction failure")
+
+    # Verify message was rolled back
+    detail = store.get_conversation(conv.id)
+    assert detail is not None
+    assert len(detail.messages) == 0
+
+    # Verify file is not locked and can be renamed
+    renamed = tmp_path / "lifecycle_rollback_renamed.db"
+    db_file.rename(renamed)
+    assert renamed.exists()
+
+
+def test_persistence_across_separate_store_instances(tmp_path: Path):
+    """Verify conversation and messages persist cleanly across separate store instances."""
+    db_file = tmp_path / "cross_instance.db"
+
+    # Instance 1: Create conversation and messages
+    store1 = ConversationStore(db_path=db_file)
+    conv = store1.create_conversation(title="Multi-Instance Chat")
+    store1.add_message(conv.id, role="user", content="First question")
+    store1.add_message(conv.id, role="assistant", content="First answer")
+
+    # Instance 2: Read conversation from same db file
+    store2 = ConversationStore(db_path=db_file)
+    convs = store2.list_conversations()
+    assert len(convs) == 1
+    assert convs[0].title == "Multi-Instance Chat"
+    assert convs[0].message_count == 2
+
+    detail = store2.get_conversation(conv.id)
+    assert detail is not None
+    assert len(detail.messages) == 2
+    assert detail.messages[0].content == "First question"
+    assert detail.messages[1].content == "First answer"
+
+    # Instance 2: Delete conversation
+    deleted = store2.delete_conversation(conv.id)
+    assert deleted is True
+
+    # Instance 3: Verify clean slate persisted after deletion
+    store3 = ConversationStore(db_path=db_file)
+    assert len(store3.list_conversations()) == 0
+    assert store3.get_conversation(conv.id) is None

@@ -38,7 +38,14 @@ logger = get_logger("agent")
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are LOKI, an offline, privacy-first local AI desktop assistant running entirely "
-    "on the user's machine. Provide helpful, concise, and accurate answers."
+    "on the user's machine.\n"
+    "Guidelines:\n"
+    "- Provide direct, accurate, and concise answers to the user's question.\n"
+    "- Avoid conversational filler, introductory preambles, and unnecessary disclaimers.\n"
+    "- Avoid repeating sentences, phrases, or the user's prompt.\n"
+    "- If you do not know the answer or lack local data, state so concisely rather than guessing.\n"
+    "- You are a conversational language model: do not claim to execute operating system commands, "
+    "launch applications, or modify files. System tools are handled deterministically outside the LLM."
 )
 
 
@@ -97,6 +104,11 @@ class LokiAgent:
         self.allow_fallback = allow_fallback
         self.storage = storage
         self.active_conversation_id = active_conversation_id
+        self.max_history_messages = (
+            getattr(self.config.models, "max_history_messages", 20)
+            if self.config and hasattr(self.config, "models")
+            else 20
+        )
 
         self._conversation_history: list[dict[str, str]] = []
         if self.storage and self.active_conversation_id:
@@ -116,7 +128,9 @@ class LokiAgent:
             detail = self.storage.get_conversation(conversation_id)
             if not detail:
                 return False
-            self._conversation_history = self.storage.get_context_messages(conversation_id)
+            self._conversation_history = self.storage.get_context_messages(
+                conversation_id, max_messages=self.max_history_messages
+            )
             return True
         return True
 
@@ -308,9 +322,19 @@ class LokiAgent:
         if chat_mode:
             if self.storage and effective_conv_id:
                 self.storage.add_message(effective_conv_id, role="user", content=clean_input, source="user")
-                self._conversation_history = self.storage.get_context_messages(effective_conv_id)
+                self._conversation_history = self.storage.get_context_messages(
+                    effective_conv_id, max_messages=self.max_history_messages
+                )
             else:
                 self._conversation_history.append({"role": "user", "content": clean_input})
+                if len(self._conversation_history) > self.max_history_messages:
+                    self._conversation_history = self._conversation_history[-self.max_history_messages:]
+                    while (
+                        self._conversation_history
+                        and self._conversation_history[0]["role"] == "assistant"
+                        and len(self._conversation_history) > 1
+                    ):
+                        self._conversation_history = self._conversation_history[1:]
 
             messages = [{"role": "system", "content": self.system_prompt}] + self._conversation_history
 
@@ -324,7 +348,9 @@ class LokiAgent:
                         source="llm",
                         model_used=effective_model,
                     )
-                    self._conversation_history = self.storage.get_context_messages(effective_conv_id)
+                    self._conversation_history = self.storage.get_context_messages(
+                        effective_conv_id, max_messages=self.max_history_messages
+                    )
                 else:
                     self._conversation_history.append({"role": "assistant", "content": reply})
 
@@ -339,7 +365,9 @@ class LokiAgent:
             except (ModelNotFoundError, ModelInferenceError, ModelOutputParseError, ModelFallbackError) as e:
                 # Rollback or reload context to prevent poisoned history
                 if self.storage and effective_conv_id:
-                    self._conversation_history = self.storage.get_context_messages(effective_conv_id)
+                    self._conversation_history = self.storage.get_context_messages(
+                        effective_conv_id, max_messages=self.max_history_messages
+                    )
                 else:
                     self._conversation_history.pop()
                 logger.error("Local LLM chat failed: %s", e)

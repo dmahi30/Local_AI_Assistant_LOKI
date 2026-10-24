@@ -9,11 +9,12 @@ Guarantees:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
-from typing import Any
+from typing import Any, Generator
 import uuid
 from pydantic import BaseModel, Field
 
@@ -98,15 +99,33 @@ class ConversationStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_database()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Create and configure a SQLite connection with foreign keys enabled."""
+    @contextmanager
+    def _get_connection(self) -> Generator[sqlite3.Connection, None, None]:
+        """Create and configure a SQLite connection with foreign keys enabled.
+
+        Guarantees that transactions commit on success or rollback on exception,
+        and that every connection is explicitly closed upon exit to prevent file
+        locks and resource leaks on Windows.
+        """
+        conn: sqlite3.Connection | None = None
         try:
             conn = sqlite3.connect(str(self.db_path), timeout=10.0)
             conn.execute("PRAGMA foreign_keys = ON;")
             conn.row_factory = sqlite3.Row
-            return conn
         except sqlite3.Error as e:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             raise StorageError(f"Failed to connect to SQLite database at {self.db_path}: {e}") from e
+
+        try:
+            with conn:
+                yield conn
+        finally:
+            if conn is not None:
+                conn.close()
 
     def _init_database(self) -> None:
         """Create tables and indexes if they do not exist."""
@@ -347,22 +366,46 @@ class ConversationStore:
         except sqlite3.Error as e:
             raise StorageError(f"Failed to add message to conversation {conversation_id}: {e}") from e
 
-    def get_context_messages(self, conversation_id: str) -> list[dict[str, str]]:
+    def get_context_messages(
+        self,
+        conversation_id: str,
+        max_messages: int | None = 20,
+        max_tool_chars: int = 400,
+    ) -> list[dict[str, str]]:
         """Return strictly scoped user and assistant messages for LLM context window.
 
         Invariants:
         - Scoped strictly to conversation_id (never leaks turns from other chats).
         - Excludes non-conversational system alerts or error notifications.
         - Preserves strict chronological order.
+        - Enforces sliding-window limit (max_messages) without deleting historical SQLite records.
+        - Preserves turn boundaries: begins on a user turn after system prompt where practical.
+        - Applies safe prompt-only bounding for bulky deterministic command output.
         """
         detail = self.get_conversation(conversation_id)
         if not detail:
             return []
 
+        # 1. Filter conversational roles
+        candidate_messages: list[MessageRecord] = [
+            m for m in detail.messages if m.role in ("user", "assistant")
+        ]
+
+        # 2. Enforce sliding window while preserving valid turn boundaries
+        if max_messages is not None and max_messages > 0 and len(candidate_messages) > max_messages:
+            candidate_messages = candidate_messages[-max_messages:]
+            # Ensure context starts on a user message so the prompt follows system prompt naturally
+            while candidate_messages and candidate_messages[0].role == "assistant" and len(candidate_messages) > 1:
+                candidate_messages = candidate_messages[1:]
+
+        # 3. Construct LLM context items with bounded tool output
         context: list[dict[str, str]] = []
-        for msg in detail.messages:
-            if msg.role in ("user", "assistant"):
-                context.append({"role": msg.role, "content": msg.content})
+        for msg in candidate_messages:
+            content = msg.content
+            # Safe prompt-only bounding for deterministic tool outputs to prevent context pollution
+            if msg.source == "deterministic" and len(content) > max_tool_chars:
+                content = content[:max_tool_chars].rstrip() + "\n... [Command output truncated for context]"
+            context.append({"role": msg.role, "content": content})
         return context
 
     def clear_messages(self, conversation_id: str) -> bool:

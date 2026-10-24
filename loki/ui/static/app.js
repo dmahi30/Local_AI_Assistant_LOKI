@@ -460,11 +460,24 @@ function initLokiApp() {
         if (activeConversationId === convId) {
           activeConversationId = null;
           saveActiveConvId(null);
+          if (chatStream) chatStream.innerHTML = "";
+          if (emptyState) emptyState.style.display = "flex";
         }
         await loadConversations();
+      } else {
+        let errorDetail = `HTTP ${res.status}`;
+        try {
+          const errData = await res.json();
+          if (errData && errData.detail) errorDetail = errData.detail;
+        } catch {
+          if (res.statusText) errorDetail = `HTTP ${res.status}: ${res.statusText}`;
+        }
+        console.error(`[LOKI UI] Delete conversation failed: ${errorDetail}`);
+        alert(`Could not delete conversation: ${errorDetail}`);
       }
     } catch (err) {
-      console.error("Delete conversation failed:", err);
+      console.error("[LOKI UI] Delete conversation failed due to network error:", err);
+      alert(`Could not delete conversation due to a network error: ${err.message || err}`);
     }
   }
 
