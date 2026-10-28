@@ -46,6 +46,7 @@ class AppLauncherCommand(BaseCommand):
     description = "Opens approved desktop applications (Chrome, VS Code, Notepad, Calculator, etc.)."
     intent_type = IntentType.DETERMINISTIC_APP
     safety_level = SafetyLevel.SAFE
+    allow_model_selection = False
 
     patterns = [
         r"^(open|launch|start)\s+([a-zA-Z0-9_\-\.\s]+)$",

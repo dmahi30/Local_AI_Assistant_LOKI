@@ -253,17 +253,54 @@ def create_ui_app(
 
     @app.post("/api/confirm")
     def confirm_action(req: ConfirmRequest) -> dict[str, Any]:
-        """Approve a gated confirmation and execute the authorized command."""
-        approved = loki_agent.confirm_action(req.action_id)
-        if not approved:
+        """Approve and execute only the original server-side pending action."""
+        pending = loki_agent.gatekeeper.get_pending_request(req.action_id)
+        if pending is None:
             raise HTTPException(
                 status_code=400,
                 detail=f"Action ID '{req.action_id}' is invalid, expired, or already consumed.",
             )
 
-        target_conv_id = req.conversation_id or loki_agent.active_conversation_id
+        # Validate the tool BEFORE approving, so unsupported requests are never
+        # marked as confirmed. Do not execute the browser-supplied original_message;
+        # reconstruct the command from the server-authorized pending request.
+        if pending.tool_name == "file_delete":
+            if len(pending.targets) != 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid file deletion confirmation targets.",
+                )
+            authorized_message = f"delete {pending.targets[0]}"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="This confirmation action is not supported by the UI.",
+            )
+
+        # Verify that conversation IDs cannot redirect an approved action into an unintended context.
+        if pending.conversation_id is not None and req.conversation_id is not None:
+            if pending.conversation_id != req.conversation_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Conversation ID mismatch: action '{req.action_id}' belongs to conversation '{pending.conversation_id}'.",
+                )
+
+        # Bind approval to the server's original tool, targets, and conversation.
+        approved = loki_agent.confirm_action(
+            req.action_id,
+            expected_tool=pending.tool_name,
+            expected_targets=pending.targets,
+            expected_conversation_id=pending.conversation_id,
+        )
+        if not approved:
+            raise HTTPException(
+                status_code=400,
+                detail="Confirmation could not be verified.",
+            )
+
+        target_conv_id = pending.conversation_id or req.conversation_id or loki_agent.active_conversation_id
         response = loki_agent.handle_input(
-            text=req.original_message,
+            text=authorized_message,
             action_id=req.action_id,
             conversation_id=target_conv_id,
         )

@@ -184,6 +184,7 @@ class SafetyGatekeeper:
         description: str,
         targets: list[str],
         safety_level: SafetyLevel = SafetyLevel.DANGEROUS,
+        conversation_id: str | None = None,
     ) -> SafetyConfirmationRequest:
         """Create a pending confirmation request for a dangerous operation."""
         self._prune_expired_confirmations()
@@ -201,6 +202,7 @@ class SafetyGatekeeper:
             confirmed=False,
             created_at=time.time(),
             ttl_seconds=ttl,
+            conversation_id=conversation_id,
         )
         self._pending_confirmations[action_id] = req
         logger.warning(
@@ -222,6 +224,7 @@ class SafetyGatekeeper:
         action_id: str,
         expected_tool: str | None = None,
         expected_targets: list[str] | None = None,
+        expected_conversation_id: str | None = None,
     ) -> bool:
         """Approve a pending confirmation request with optional tool and target validation."""
         self._prune_expired_confirmations()
@@ -240,6 +243,19 @@ class SafetyGatekeeper:
             if req_targets != exp_targets:
                 logger.warning("Confirmation rejected: targets mismatch for %s", action_id)
                 return False
+
+        if (
+            expected_conversation_id is not None
+            and req.conversation_id is not None
+            and req.conversation_id != expected_conversation_id
+        ):
+            logger.warning(
+                "Confirmation rejected: conversation mismatch for %s (expected %s, got %s)",
+                action_id,
+                expected_conversation_id,
+                req.conversation_id,
+            )
+            return False
 
         req.confirmed = True
         logger.info("Action [%s] approved by user", action_id)
@@ -268,7 +284,8 @@ class SafetyGatekeeper:
         3. TTL expiration check
         4. User confirmation check
         5. Exact tool name binding
-        6. Exact canonical target path binding
+        6. Exact canonical target path binding (missing targets are rejected
+           when the confirmation was approved for specific targets)
         """
         # If destructive operations require confirmation
         if safety_level == SafetyLevel.DANGEROUS and self.config.require_confirmation_for_destructive:
@@ -310,7 +327,18 @@ class SafetyGatekeeper:
                     },
                 )
 
-            # Check targets binding
+            # Check targets binding. Missing targets must not bypass a
+            # confirmation that was approved for specific targets.
+            if req.targets and not targets:
+                raise SafetyViolationError(
+                    f"Execution blocked: Target information is missing for action '{action_id}'.",
+                    details={
+                        "action_id": action_id,
+                        "expected_targets": req.targets,
+                        "actual_targets": targets,
+                    },
+                )
+
             if targets is not None:
                 req_targets = sorted([str(Path(t).resolve()).lower() for t in req.targets])
                 actual_targets = sorted([str(Path(t).resolve()).lower() for t in targets])

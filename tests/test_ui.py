@@ -8,6 +8,7 @@ import pytest
 import requests
 import uvicorn
 
+import loki.commands.builtin.file_delete as file_delete_module
 from loki.agent import LokiAgent, ResponseSource
 from loki.core.config import LokiConfig
 from loki.core.types import ToolResult
@@ -115,14 +116,23 @@ def test_ui_chat_conversational_llm(mock_agent):
     assert res["model_used"] == "qwen2.5:0.5b"
 
 
-def test_ui_gated_confirmation_and_approval_flow(tmp_path: Path):
+def test_ui_gated_confirmation_and_approval_flow(tmp_path: Path, monkeypatch):
     """Verify UI handles pending confirmation and authorizes execution via /api/confirm."""
     safe_root = tmp_path / "UIDir"
     safe_root.mkdir()
     target_file = safe_root / "obsolete.tmp"
     target_file.write_text("delete me", encoding="utf-8")
 
+    # Never move test files into the real Windows Recycle Bin.
+    # Simulate the file leaving its original location instead.
+    monkeypatch.setattr(
+        file_delete_module,
+        "_move_to_recycle_bin",
+        lambda path: path.unlink(),
+    )
+
     gk = SafetyGatekeeper(allowed_search_roots=[safe_root])
+    gk.config.recycle_bin_deletions = True
     agent = LokiAgent(gatekeeper=gk)
     app = create_ui_app(agent=agent)
 
@@ -149,6 +159,54 @@ def test_ui_gated_confirmation_and_approval_flow(tmp_path: Path):
     )
     assert confirm_res["success"] is True
     assert not target_file.exists()
+
+
+def test_ui_confirmation_ignores_modified_browser_message(tmp_path: Path, monkeypatch):
+    """A browser cannot redirect a confirmed deletion to a different file."""
+    safe_root = tmp_path / "UIDir"
+    safe_root.mkdir()
+    approved_file = safe_root / "approved.tmp"
+    other_file = safe_root / "other.tmp"
+    approved_file.write_text("approved", encoding="utf-8")
+    other_file.write_text("must remain", encoding="utf-8")
+
+    moved = []
+
+    def fake_recycle_bin(path: Path) -> None:
+        moved.append(path)
+        path.unlink()  # Simulate the file leaving its original location.
+
+    monkeypatch.setattr(file_delete_module, "_move_to_recycle_bin", fake_recycle_bin)
+
+    gk = SafetyGatekeeper(allowed_search_roots=[safe_root])
+    gk.config.recycle_bin_deletions = True
+    agent = LokiAgent(gatekeeper=gk)
+    app = create_ui_app(agent=agent)
+
+    chat_fn = None
+    confirm_fn = None
+    for route in app.routes:
+        if getattr(route, "path", None) == "/api/chat":
+            chat_fn = route.endpoint
+        elif getattr(route, "path", None) == "/api/confirm":
+            confirm_fn = route.endpoint
+
+    chat_res = chat_fn(ChatRequest(message=f"delete {approved_file}"))
+    action_id = chat_res["pending_confirmation"]["action_id"]
+
+    # The browser tampers with original_message to point at a different file.
+    confirm_res = confirm_fn(
+        ConfirmRequest(
+            action_id=action_id,
+            original_message=f"delete {other_file}",
+        )
+    )
+
+    assert confirm_res["success"] is True
+    assert moved == [approved_file.resolve()]
+    assert not approved_file.exists()
+    assert other_file.exists()
+    assert other_file.read_text(encoding="utf-8") == "must remain"
 
 
 def test_ui_cancel_action(tmp_path: Path):
@@ -552,3 +610,154 @@ def test_run_desktop_ui_reuses_instance_on_arbitrary_port_via_server_info(mock_a
                 # Reused dynamic port instance, avoided starting second server
                 mock_server_run.assert_not_called()
                 mock_launch.assert_called_once_with("http://127.0.0.1:54321")
+
+# =========================================================================
+# Phase 8: Hardened Confirmation UI Security Tests
+# =========================================================================
+
+def test_ui_confirm_rejects_unsupported_tools():
+    """Verify /api/confirm rejects actions for tools not supported by UI confirmation."""
+    from fastapi import HTTPException
+
+    gk = SafetyGatekeeper()
+    # Create a pending confirmation for an unsupported tool
+    req = gk.request_confirmation("system_terminal_exec", "Run terminal script", ["C:\\script.bat"])
+
+    agent = LokiAgent(gatekeeper=gk)
+    app = create_ui_app(agent=agent)
+
+    confirm_fn = None
+    for route in app.routes:
+        if getattr(route, "path", None) == "/api/confirm":
+            confirm_fn = route.endpoint
+
+    with pytest.raises(HTTPException) as exc_info:
+        confirm_fn(ConfirmRequest(action_id=req.action_id, original_message="run script"))
+
+    assert exc_info.value.status_code == 400
+    assert "not supported by the UI" in exc_info.value.detail
+    # Invariant: Action was never confirmed
+    assert gk.get_pending_request(req.action_id).confirmed is False
+
+
+def test_ui_confirm_rejects_expired_action():
+    """Verify /api/confirm rejects action IDs that have exceeded their TTL."""
+    from fastapi import HTTPException
+
+    gk = SafetyGatekeeper()
+    req = gk.request_confirmation("file_delete", "Delete file", ["C:\\temp.txt"])
+    # Artificially expire the request
+    req.ttl_seconds = 0.001
+    time.sleep(0.01)
+
+    agent = LokiAgent(gatekeeper=gk)
+    app = create_ui_app(agent=agent)
+
+    confirm_fn = next(r.endpoint for r in app.routes if getattr(r, "path", None) == "/api/confirm")
+
+    with pytest.raises(HTTPException) as exc_info:
+        confirm_fn(ConfirmRequest(action_id=req.action_id, original_message="delete C:\\temp.txt"))
+
+    assert exc_info.value.status_code == 400
+    assert "invalid, expired, or already consumed" in exc_info.value.detail
+
+
+def test_ui_confirm_rejects_replay_attempts(tmp_path: Path, monkeypatch):
+    """Verify a consumed action ID cannot be replayed a second time."""
+    from fastapi import HTTPException
+
+    safe_root = tmp_path / "UIDir"
+    safe_root.mkdir()
+    target_file = safe_root / "temp.log"
+    target_file.write_text("to delete", encoding="utf-8")
+
+    monkeypatch.setattr(
+        file_delete_module,
+        "_move_to_recycle_bin",
+        lambda p: p.unlink(),
+    )
+
+    gk = SafetyGatekeeper(allowed_search_roots=[safe_root])
+    agent = LokiAgent(gatekeeper=gk)
+    app = create_ui_app(agent=agent)
+
+    chat_fn = next(r.endpoint for r in app.routes if getattr(r, "path", None) == "/api/chat")
+    confirm_fn = next(r.endpoint for r in app.routes if getattr(r, "path", None) == "/api/confirm")
+
+    # Step 1: Request dangerous action
+    chat_res = chat_fn(ChatRequest(message=f"delete {target_file}"))
+    action_id = chat_res["pending_confirmation"]["action_id"]
+
+    # Step 2: First confirmation succeeds
+    confirm_res1 = confirm_fn(ConfirmRequest(action_id=action_id, original_message=f"delete {target_file}"))
+    assert confirm_res1["success"] is True
+    assert not target_file.exists()
+
+    # Step 3: Replay with same action_id must be strictly rejected
+    with pytest.raises(HTTPException) as exc_info:
+        confirm_fn(ConfirmRequest(action_id=action_id, original_message=f"delete {target_file}"))
+
+    assert exc_info.value.status_code == 400
+    assert "invalid, expired, or already consumed" in exc_info.value.detail
+
+
+def test_ui_confirm_rejects_conversation_id_tampering(tmp_path: Path, monkeypatch):
+    """Verify /api/confirm rejects requests attempting to redirect approval to a different conversation."""
+    from fastapi import HTTPException
+
+    safe_root = tmp_path / "UIDir"
+    safe_root.mkdir()
+    target_file = safe_root / "test.txt"
+    target_file.write_text("content", encoding="utf-8")
+
+    monkeypatch.setattr(
+        file_delete_module,
+        "_move_to_recycle_bin",
+        lambda p: p.unlink(),
+    )
+
+    gk = SafetyGatekeeper(allowed_search_roots=[safe_root])
+    agent = LokiAgent(gatekeeper=gk)
+    app = create_ui_app(agent=agent)
+
+    chat_fn = next(r.endpoint for r in app.routes if getattr(r, "path", None) == "/api/chat")
+    confirm_fn = next(r.endpoint for r in app.routes if getattr(r, "path", None) == "/api/confirm")
+
+    # Create confirmation bound to conversation "conv_original"
+    chat_res = chat_fn(ChatRequest(message=f"delete {target_file}", conversation_id="conv_original"))
+    action_id = chat_res["pending_confirmation"]["action_id"]
+
+    # Attempt to confirm from an unauthorized conversation "conv_hijacker"
+    with pytest.raises(HTTPException) as exc_info:
+        confirm_fn(
+            ConfirmRequest(
+                action_id=action_id,
+                original_message=f"delete {target_file}",
+                conversation_id="conv_hijacker",
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "Conversation ID mismatch" in exc_info.value.detail
+    # Invariant: target file was NOT deleted
+    assert target_file.exists()
+
+
+def test_ui_confirm_rejects_invalid_targets_count():
+    """Verify /api/confirm rejects file_delete requests with multiple or zero targets."""
+    from fastapi import HTTPException
+
+    gk = SafetyGatekeeper()
+    # file_delete requires exactly one target
+    req = gk.request_confirmation("file_delete", "Multi delete", ["C:\\file1.txt", "C:\\file2.txt"])
+
+    agent = LokiAgent(gatekeeper=gk)
+    app = create_ui_app(agent=agent)
+
+    confirm_fn = next(r.endpoint for r in app.routes if getattr(r, "path", None) == "/api/confirm")
+
+    with pytest.raises(HTTPException) as exc_info:
+        confirm_fn(ConfirmRequest(action_id=req.action_id, original_message="delete files"))
+
+    assert exc_info.value.status_code == 400
+    assert "Invalid file deletion confirmation targets" in exc_info.value.detail

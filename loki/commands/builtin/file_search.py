@@ -20,6 +20,53 @@ class FileSearchCommand(BaseCommand):
     description = "Searches for files matching a keyword or pattern in safe user directories."
     intent_type = IntentType.FILE_SEARCH
     safety_level = SafetyLevel.SAFE
+    allow_model_selection = True
+
+    def get_parameters_schema(self) -> dict[str, Any]:
+        """Return JSON Schema for model-assisted tool calling."""
+        return {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "File search pattern, filename, or keyword to find.",
+                },
+                "location": {
+                    "type": ["string", "null"],
+                    "maxLength": 260,
+                    "description": "Optional safe folder alias (downloads, desktop, documents, pictures, videos) or directory path.",
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        }
+
+    def validate_args(self, args: dict[str, Any]) -> tuple[bool, str | None]:
+        """Strictly validate file_search arguments against length, characters, and schemas."""
+        if not isinstance(args, dict):
+            return False, "Arguments must be a dictionary."
+        extra_keys = set(args.keys()) - {"query", "location"}
+        if extra_keys:
+            return False, f"Unexpected arguments for file_search: {', '.join(sorted(extra_keys))}"
+        query = args.get("query")
+        if not isinstance(query, str) or not query.strip():
+            return False, "Query must be a non-empty string."
+        if len(query) > 200:
+            return False, "Query exceeds maximum allowed length of 200 characters."
+        if any(ord(c) < 32 for c in query):
+            return False, "Query contains invalid control characters."
+
+        location = args.get("location")
+        if location is not None:
+            if not isinstance(location, str):
+                return False, "Location must be a string or null."
+            if len(location) > 260:
+                return False, "Location exceeds maximum allowed path length of 260 characters."
+            if any(ord(c) < 32 for c in location):
+                return False, "Location contains invalid control characters."
+        return True, None
 
     patterns = [
         r"^(find|search for|locate)\s+(?:file\s+)?(.+)$",

@@ -19,6 +19,37 @@ class SystemInfoCommand(BaseCommand):
     description = "Queries real-time system metrics such as battery, RAM, CPU, and storage."
     intent_type = IntentType.DETERMINISTIC_SYSTEM
     safety_level = SafetyLevel.SAFE
+    allow_model_selection = True
+    ALLOWED_METRICS = ("all", "battery", "ram", "cpu", "storage")
+
+    def get_parameters_schema(self) -> dict[str, Any]:
+        """Return JSON Schema for model-assisted tool calling."""
+        return {
+            "type": "object",
+            "properties": {
+                "metric": {
+                    "type": "string",
+                    "enum": list(self.ALLOWED_METRICS),
+                    "description": "Specific telemetry metric to query: battery, ram, cpu, storage, or all.",
+                }
+            },
+            "required": ["metric"],
+            "additionalProperties": False,
+        }
+
+    def validate_args(self, args: dict[str, Any]) -> tuple[bool, str | None]:
+        """Validate system_info arguments against schema and allowable metrics."""
+        if not isinstance(args, dict):
+            return False, "Arguments must be a dictionary."
+        extra_keys = set(args.keys()) - {"metric"}
+        if extra_keys:
+            return False, f"Unexpected arguments for system_info: {', '.join(sorted(extra_keys))}"
+        if "metric" not in args:
+            return False, "Missing required argument 'metric' for system_info."
+        metric = args["metric"]
+        if not isinstance(metric, str) or metric.lower() not in self.ALLOWED_METRICS:
+            return False, f"Invalid metric '{metric}'. Must be one of: {', '.join(self.ALLOWED_METRICS)}"
+        return True, None
 
     patterns = [
         r"^(what('?s| is) my )?(battery|battery percentage|battery status|charging status)$",

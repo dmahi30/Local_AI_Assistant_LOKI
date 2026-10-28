@@ -20,6 +20,7 @@ class BaseCommand(ABC):
     intent_type: IntentType
     safety_level: SafetyLevel = SafetyLevel.SAFE
     patterns: list[str] = []
+    allow_model_selection: bool = False
 
     def __init__(self) -> None:
         self._compiled_patterns = [
@@ -30,6 +31,20 @@ class BaseCommand(ABC):
         """Check if this command matches the input text."""
         cleaned = text.strip()
         return any(p.search(cleaned) is not None for p in self._compiled_patterns)
+
+    def get_parameters_schema(self) -> dict[str, Any]:
+        """Return JSON schema defining valid arguments for structured tool calls."""
+        return {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+
+    def validate_args(self, args: dict[str, Any]) -> tuple[bool, str | None]:
+        """Validate input arguments before execution. Subclasses may override."""
+        if not isinstance(args, dict):
+            return False, f"Arguments must be a dictionary, got {type(args).__name__}"
+        return True, None
 
     @abstractmethod
     def extract_args(self, text: str) -> dict[str, Any]:
@@ -55,19 +70,60 @@ class BaseCommand(ABC):
         """Execute with execution time tracking, fail-closed safety verification, and error preservation."""
         start_time = time.perf_counter()
         try:
-            # Enforce fail-closed invariant for dangerous operations
-            if self.safety_level == SafetyLevel.DANGEROUS and gatekeeper is None:
-                raise SafetyViolationError(
-                    f"Security invariant violated: Dangerous command '{self.name}' requires an active SafetyGatekeeper.",
-                    details={"command": self.name, "safety_level": self.safety_level.value},
+            # Validate input arguments
+            is_valid, validation_err = self.validate_args(args)
+            if not is_valid:
+                return ToolResult(
+                    success=False,
+                    error=validation_err or "Invalid command arguments.",
+                    safety_level=self.safety_level,
+                    execution_time_ms=round((time.perf_counter() - start_time) * 1000, 2),
+                    metadata={"command": self.name},
                 )
 
-            # Enforce gatekeeper permission if provided
-            if gatekeeper is not None:
-                targets = args.get("targets") or ([args["path"]] if "path" in args else None)
+            # Extract target paths from args
+            raw_targets = args.get("targets")
+            if raw_targets and isinstance(raw_targets, (list, tuple)):
+                targets = [str(t) for t in raw_targets if t]
+            elif raw_targets and isinstance(raw_targets, str) and raw_targets.strip():
+                targets = [raw_targets.strip()]
+            elif "path" in args and args["path"]:
+                targets = [str(args["path"]).strip()]
+            elif "target" in args and args["target"]:
+                targets = [str(args["target"]).strip()]
+            else:
+                targets = None
+
+            # Enforce fail-closed safety verification
+            if gatekeeper is None:
+                if self.safety_level == SafetyLevel.DANGEROUS:
+                    raise SafetyViolationError(
+                        f"Security invariant violated: Dangerous command '{self.name}' requires an active SafetyGatekeeper.",
+                        details={"command": self.name, "safety_level": self.safety_level.value},
+                    )
+                if targets:
+                    # Guard against direct execution bypassing gatekeeper risk escalation
+                    default_gk = SafetyGatekeeper()
+                    effective_safety = default_gk.evaluate_risk(
+                        tool_name=self.name,
+                        declared_level=self.safety_level,
+                        targets=targets,
+                    )
+                    if effective_safety == SafetyLevel.DANGEROUS:
+                        raise SafetyViolationError(
+                            f"Security invariant violated: Dangerous operation for command '{self.name}' requires an active SafetyGatekeeper.",
+                            details={"command": self.name, "effective_safety": effective_safety.value, "targets": targets},
+                        )
+            else:
+                # Re-evaluate effective risk dynamically against targets
+                effective_safety = gatekeeper.evaluate_risk(
+                    tool_name=self.name,
+                    declared_level=self.safety_level,
+                    targets=targets,
+                )
                 gatekeeper.verify_execution_permitted(
                     tool_name=self.name,
-                    safety_level=self.safety_level,
+                    safety_level=effective_safety,
                     action_id=action_id,
                     targets=targets,
                 )

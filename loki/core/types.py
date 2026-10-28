@@ -74,3 +74,4 @@ class SafetyConfirmationRequest(BaseModel):
     confirmed: bool = False
     created_at: float = Field(default_factory=time.time, description="Creation timestamp in epoch seconds")
     ttl_seconds: int = Field(default=300, description="Time to live in seconds before expiration")
+    conversation_id: str | None = Field(default=None, description="Conversation session ID bound to this confirmation")

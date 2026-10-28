@@ -54,6 +54,7 @@ class ResponseSource(str, Enum):
     DETERMINISTIC = "deterministic"
     LLM = "llm"
     SYSTEM = "system"
+    TOOL = "tool"
 
 
 class AgentResponse(BaseModel):
@@ -139,12 +140,14 @@ class LokiAgent:
         action_id: str,
         expected_tool: str | None = None,
         expected_targets: list[str] | None = None,
+        expected_conversation_id: str | None = None,
     ) -> bool:
         """Approve a pending gated confirmation request."""
         return self.gatekeeper.confirm_action(
             action_id=action_id,
             expected_tool=expected_tool,
             expected_targets=expected_targets,
+            expected_conversation_id=expected_conversation_id,
         )
 
     def cancel_action(self, action_id: str) -> bool:
@@ -244,7 +247,10 @@ class LokiAgent:
         # =========================================================================
         # Stage 0: Deterministic Command Engine (LLM Bypass)
         # =========================================================================
-        route_result = self.router.route(clean_input, action_id=action_id)
+        if effective_conv_id:
+            route_result = self.router.route(clean_input, action_id=action_id, conversation_id=effective_conv_id)
+        else:
+            route_result = self.router.route(clean_input, action_id=action_id)
 
         if route_result.matched:
             # Case 1: Gated action requiring explicit user authorization
@@ -296,6 +302,75 @@ class LokiAgent:
                     conversation_id=effective_conv_id,
                     metadata={"data": res.data},
                 )
+
+        # =========================================================================
+        # Stage 0.5: Controlled Model-Assisted Tool Selection
+        # =========================================================================
+        selectable_tools = self.router.registry.get_model_selectable_commands()
+        if chat_mode and selectable_tools:
+            try:
+                resolution = self.resolver.resolve(allow_fallback=self.allow_fallback)
+                if resolution.is_ready and resolution.effective_model:
+                    from .commands.model_selector import select_tool
+
+                    proposal = select_tool(
+                        user_input=clean_input,
+                        client=self.client,
+                        model=resolution.effective_model,
+                        selectable_commands=selectable_tools,
+                        gatekeeper=self.gatekeeper,
+                        timeout=min(self.config.models.timeout_seconds, 15.0),
+                    )
+                    if proposal is not None:
+                        tool_cmd = selectable_tools.get(proposal.tool_name)
+                        if tool_cmd is not None:
+                            tool_res = tool_cmd.execute(
+                                args=proposal.arguments,
+                                gatekeeper=self.gatekeeper,
+                                action_id=action_id,
+                            )
+                            if tool_res.success:
+                                output_text = self._format_tool_result(tool_res)
+                            else:
+                                output_text = f"Tool execution failed: {tool_res.error}"
+
+                            if self.storage and effective_conv_id:
+                                self.storage.add_message(
+                                    effective_conv_id, role="user", content=clean_input, source="user"
+                                )
+                                safe_data = (
+                                    tool_res.data
+                                    if isinstance(tool_res.data, dict)
+                                    else {"result": str(tool_res.data)}
+                                )
+                                self.storage.add_message(
+                                    effective_conv_id,
+                                    role="assistant",
+                                    content=output_text,
+                                    source="tool",
+                                    metadata={
+                                        "tool_name": proposal.tool_name,
+                                        "arguments": proposal.arguments,
+                                        "data": safe_data,
+                                    },
+                                )
+
+                            return AgentResponse(
+                                text=output_text,
+                                source=ResponseSource.TOOL,
+                                matched_command=proposal.tool_name,
+                                tool_result=tool_res,
+                                model_used=resolution.effective_model,
+                                success=tool_res.success,
+                                conversation_id=effective_conv_id,
+                                metadata={
+                                    "model_assisted": True,
+                                    "arguments": proposal.arguments,
+                                    "data": tool_res.data,
+                                },
+                            )
+            except Exception as e:
+                logger.warning("Stage 0.5 tool selection encountered error: %s", e)
 
         # =========================================================================
         # Stage 1: Fallthrough to Local AI LLM

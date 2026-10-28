@@ -35,7 +35,7 @@ class DeterministicRouter:
         self.registry = registry or CommandRegistry()
         self.gatekeeper = gatekeeper or SafetyGatekeeper()
 
-    def route(self, text: str, action_id: str | None = None) -> DeterministicRouteResult:
+    def route(self, text: str, action_id: str | None = None, conversation_id: str | None = None) -> DeterministicRouteResult:
         """Route input text to a deterministic command.
 
         If not matched, cleanly returns matched=False. Never executes arbitrary
@@ -63,6 +63,7 @@ class DeterministicRouter:
                 description=f"Request to execute {command.name}",
                 targets=targets or [],
                 safety_level=effective_safety,
+                conversation_id=conversation_id,
             )
             return DeterministicRouteResult(
                 matched=True,

@@ -305,3 +305,32 @@ def test_file_delete_blocked_when_authorization_fails(tmp_path: Path):
     res2 = router.route(f"delete {target}", action_id=action_id)
     assert res2.result.success is False
     assert target.exists()
+
+
+# =========================================================================
+# 11. Missing Targets: a confirmation bound to targets must not authorize
+#     an execution that supplies no target information
+# =========================================================================
+
+@pytest.mark.parametrize("supplied_targets", [None, []])
+def test_dangerous_confirmation_rejects_missing_targets(tmp_path: Path, supplied_targets):
+    target = tmp_path / "important.txt"
+    target.write_text("keep this file", encoding="utf-8")
+
+    gk = SafetyGatekeeper(allowed_search_roots=[tmp_path])
+    req = gk.request_confirmation(
+        "file_delete",
+        "Delete important file",
+        [str(target)],
+    )
+    assert gk.confirm_action(req.action_id) is True
+
+    with pytest.raises(SafetyViolationError):
+        gk.verify_execution_permitted(
+            tool_name="file_delete",
+            safety_level=SafetyLevel.DANGEROUS,
+            action_id=req.action_id,
+            targets=supplied_targets,
+        )
+
+    assert target.exists()

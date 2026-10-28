@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 import pytest
 
+import loki.commands.builtin.file_delete as file_delete_module
 from loki.commands.builtin.app_launcher import (
     APPROVED_APPLICATIONS,
     AppLauncherCommand,
@@ -137,13 +138,21 @@ def test_file_search_disallowed_location(tmp_path: Path):
 # FileDeleteCommand Tests (Safety Level DANGEROUS)
 # =========================================================================
 
-def test_file_delete_requires_confirmation(tmp_path: Path):
+def test_file_delete_requires_confirmation(tmp_path: Path, monkeypatch):
     safe_root = tmp_path / "UserDir"
     safe_root.mkdir()
     target_file = safe_root / "temp.log"
     target_file.write_text("to delete", encoding="utf-8")
 
+    # Avoid touching the real Recycle Bin; simulate the file leaving its location.
+    monkeypatch.setattr(
+        file_delete_module,
+        "_move_to_recycle_bin",
+        lambda p: p.unlink(),
+    )
+
     gk = SafetyGatekeeper(allowed_search_roots=[safe_root])
+    gk.config.recycle_bin_deletions = True
     cmd = FileDeleteCommand()
 
     # 1. Unconfirmed attempt blocked by Gatekeeper
@@ -188,3 +197,128 @@ def test_file_delete_blocked_on_protected_path(tmp_path: Path):
     assert res.success is False
     assert "protected or non-user location" in res.error
     assert sys_file.exists()
+
+
+def test_file_delete_uses_recycle_bin(tmp_path: Path, monkeypatch):
+    safe_root = tmp_path / "UserDir"
+    safe_root.mkdir()
+    target = safe_root / "temp.log"
+    target.write_text("keep recoverable", encoding="utf-8")
+
+    moved = []
+
+    def fake_recycle_bin(path: Path) -> None:
+        moved.append(path)
+        path.unlink()  # Simulate the file leaving its original location.
+
+    monkeypatch.setattr(file_delete_module, "_move_to_recycle_bin", fake_recycle_bin)
+
+    gk = SafetyGatekeeper(allowed_search_roots=[safe_root])
+    gk.config.recycle_bin_deletions = True
+    cmd = FileDeleteCommand()
+
+    req = gk.request_confirmation("file_delete", "Delete temp log", [str(target)])
+    gk.confirm_action(req.action_id)
+
+    result = cmd.execute(
+        {"path": str(target)},
+        gatekeeper=gk,
+        action_id=req.action_id,
+    )
+
+    assert result.success is True
+    assert result.data["status"] == "moved_to_recycle_bin"
+    assert moved == [target.resolve()]
+    assert not target.exists()
+
+
+def test_file_delete_recycle_bin_failure_keeps_file(tmp_path: Path, monkeypatch):
+    safe_root = tmp_path / "UserDir"
+    safe_root.mkdir()
+    target = safe_root / "temp.log"
+    target.write_text("keep this file", encoding="utf-8")
+
+    def failing_recycle_bin(path: Path) -> None:
+        raise OSError("Recycle Bin unavailable")
+
+    monkeypatch.setattr(file_delete_module, "_move_to_recycle_bin", failing_recycle_bin)
+
+    gk = SafetyGatekeeper(allowed_search_roots=[safe_root])
+    gk.config.recycle_bin_deletions = True
+    cmd = FileDeleteCommand()
+
+    req = gk.request_confirmation("file_delete", "Delete temp log", [str(target)])
+    gk.confirm_action(req.action_id)
+
+    result = cmd.execute(
+        {"path": str(target)},
+        gatekeeper=gk,
+        action_id=req.action_id,
+    )
+
+    assert result.success is False
+    assert "Recycle Bin" in result.error
+    assert target.exists()
+    assert target.read_text(encoding="utf-8") == "keep this file"
+
+
+def test_file_delete_rejects_mismatched_path_and_targets(tmp_path: Path, monkeypatch):
+    safe_root = tmp_path / "UserDir"
+    safe_root.mkdir()
+    authorized_file = safe_root / "authorized.txt"
+    actual_file = safe_root / "actual.txt"
+    authorized_file.write_text("authorized", encoding="utf-8")
+    actual_file.write_text("must remain", encoding="utf-8")
+
+    called = []
+    monkeypatch.setattr(
+        file_delete_module,
+        "_move_to_recycle_bin",
+        lambda p: called.append(p),
+    )
+
+    gk = SafetyGatekeeper(allowed_search_roots=[safe_root])
+    gk.config.recycle_bin_deletions = True
+    cmd = FileDeleteCommand()
+
+    # Confirmation is granted for authorized.txt only.
+    req = gk.request_confirmation(
+        "file_delete", "Delete authorized file", [str(authorized_file)]
+    )
+    gk.confirm_action(req.action_id)
+
+    # Attacker-style call: path points at a different file than targets.
+    result = cmd.execute(
+        {
+            "path": str(actual_file),
+            "targets": [str(authorized_file)],
+        },
+        gatekeeper=gk,
+        action_id=req.action_id,
+    )
+
+    assert result.success is False
+    assert called == []  # Recycle Bin helper was never invoked
+    assert authorized_file.exists()
+    assert actual_file.exists()
+    assert actual_file.read_text(encoding="utf-8") == "must remain"
+
+@pytest.mark.skipif(file_delete_module.os.name != "nt", reason="Recycle Bin is Windows-specific")
+def test_real_windows_recycle_bin_integration(tmp_path: Path):
+    """Integration test verifying Windows SHFileOperationW moves a temporary file to the Recycle Bin."""
+    safe_file = tmp_path / "real_recycle_test.tmp"
+    safe_file.write_text("temporary data to recycle safely", encoding="utf-8")
+    assert safe_file.exists()
+
+    # Call the actual Windows API without mocking
+    file_delete_module._move_to_recycle_bin(safe_file)
+
+    assert not safe_file.exists()
+
+
+@pytest.mark.skipif(file_delete_module.os.name != "nt", reason="Recycle Bin is Windows-specific")
+def test_windows_recycle_bin_missing_file_raises(tmp_path: Path):
+    """Verify SHFileOperationW on non-existent file raises OSError safely."""
+    missing_file = tmp_path / "non_existent_file.tmp"
+    with pytest.raises(OSError):
+        file_delete_module._move_to_recycle_bin(missing_file)
