@@ -58,6 +58,7 @@ def build_tool_selection_prompt(selectable_commands: dict[str, BaseCommand]) -> 
         "STRICT CRITERIA:\n"
         "- ONLY select 'system_info' if the user specifically asks about PC/hardware status: battery, RAM/memory, CPU, or storage/disk.\n"
         "- ONLY select 'file_search' if the user asks to find, locate, search for, or list files or folders on disk.\n"
+        "- ONLY select 'file_create' if the user asks to create or make a new file or folder on disk.\n"
         "- For ALL OTHER requests (including conversational chat, arithmetic/math like 'what is 25+17', personal questions like 'what is my favorite color', writing, or general knowledge), you MUST respond with: {\"tool\": \"none\"}.\n\n"
         "RESPONSE FORMAT:\n"
         "Respond with ONLY a raw JSON object:\n"
@@ -163,9 +164,15 @@ def parse_and_validate_tool_call(
                 "where is", "show me", "folder", "folders", "directory", "directories", "list", "contents",
                 ".txt", ".pdf", ".docx", ".log", ".csv", ".py", ".md", ".json", ".zip"
             )
-            q_val = str(args.get("query", "")).lower()
-            if not any(kw in query_lower for kw in search_keywords) and (q_val not in query_lower):
+            if not any(kw in query_lower for kw in search_keywords):
                 return None, "Tool 'file_search' proposed but user query contains no search keywords."
+
+        elif tool_name in ("file_create", "folder_create"):
+            create_keywords = (
+                "create", "make", "new", "write", "generate", "file", "folder", "directory", "dir", "touch", "text"
+            )
+            if not any(kw in query_lower for kw in create_keywords):
+                return None, f"Tool '{tool_name}' proposed but user query contains no file/folder creation keywords."
 
     # Invariant 5: Additional path checks for file_search
     if tool_name == "file_search":
@@ -201,6 +208,56 @@ def parse_and_validate_tool_call(
                 resolved_loc = alias_map.get(loc_clean.lower(), Path(loc_clean).resolve())
                 if not gatekeeper.is_path_safe_for_read(resolved_loc):
                     return None, f"Location '{location}' is restricted or outside safe read roots."
+
+    # Invariant 6: Path and extension checks for file_create / folder_create
+    if tool_name in ("file_create", "folder_create"):
+        name = args.get("name")
+        location = args.get("location")
+        if not name or not location:
+            return None, "File creation requires both 'name' and 'location'."
+        if "\x00" in name or "\n" in name or "\r" in name:
+            return None, "File creation name contains invalid characters."
+        if "\x00" in location or "\n" in location or "\r" in location:
+            return None, "File creation location contains invalid characters."
+
+        ext = Path(name).suffix.lower()
+        if ext in (
+            ".exe", ".bat", ".cmd", ".ps1", ".vbs", ".com",
+            ".msi", ".msp", ".scr", ".pif", ".wsf", ".wsh",
+            ".jar", ".sh", ".bash", ".csh", ".reg", ".inf",
+            ".dll", ".sys", ".drv", ".appx", ".msix",
+        ):
+            return None, f"Creating files with prohibited executable/script extension '{ext}' is not permitted."
+
+        if gatekeeper is not None:
+            user_home = Path.home().resolve()
+            project_root = Path(__file__).resolve().parents[2]
+            alias_map = {
+                "downloads": user_home / "Downloads",
+                "download": user_home / "Downloads",
+                "documents": user_home / "Documents",
+                "docs": user_home / "Documents",
+                "doc": user_home / "Documents",
+                "desktop": user_home / "Desktop",
+                "pictures": user_home / "Pictures",
+                "pics": user_home / "Pictures",
+                "images": user_home / "Pictures",
+                "videos": user_home / "Videos",
+                "vids": user_home / "Videos",
+                "music": user_home / "Music",
+                "project": project_root,
+                "loki project": project_root,
+                "loki": project_root,
+                "workspace": project_root,
+            }
+            loc_clean = re.sub(r"^(?:my|the)\s+", "", location.strip(), flags=re.IGNORECASE).strip()
+            loc_clean = re.sub(r"\s+(?:folder|directory|dir)$", "", loc_clean, flags=re.IGNORECASE).strip()
+            resolved_loc = alias_map.get(loc_clean.lower(), Path(loc_clean).resolve())
+            if not gatekeeper.is_path_safe_for_write(resolved_loc):
+                return None, f"Creation location '{location}' is restricted or outside safe write roots."
+            dest = (resolved_loc / name).resolve()
+            if not gatekeeper.is_path_safe_for_write(dest):
+                return None, f"Destination path '{name}' is restricted or outside safe write roots."
 
     return ModelToolProposal(tool_name=tool_name, arguments=args), None
 

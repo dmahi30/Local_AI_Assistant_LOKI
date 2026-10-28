@@ -7,8 +7,10 @@ from typing import Any
 from .base import BaseCommand
 from .builtin import (
     AppLauncherCommand,
+    FileCreateCommand,
     FileDeleteCommand,
     FileSearchCommand,
+    FolderCreateCommand,
     SystemInfoCommand,
 )
 
@@ -22,6 +24,8 @@ class CommandRegistry:
             self.register(SystemInfoCommand())
             self.register(AppLauncherCommand())
             self.register(FileSearchCommand())
+            self.register(FileCreateCommand())
+            self.register(FolderCreateCommand())
             self.register(FileDeleteCommand())
 
     def register(self, command: BaseCommand) -> None:

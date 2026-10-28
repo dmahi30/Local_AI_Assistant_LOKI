@@ -175,6 +175,14 @@ class LokiAgent:
         if isinstance(data, dict):
             if "status" in data and data["status"] == "launched":
                 return f"Launched {data.get('app', 'application')} successfully."
+            if "created" in data and "type" in data:
+                item_type = data["type"]
+                name = data.get("name", "item")
+                path = data["created"]
+                if item_type in ("folder", "directory"):
+                    return f"Folder '{name}' created successfully at {path}."
+                size_str = f" ({data.get('size_bytes', 0)} bytes)" if "size_bytes" in data else ""
+                return f"File '{name}' created successfully at {path}{size_str}."
             if "deleted_file" in data:
                 return f"File deleted successfully: {data.get('deleted_file')}"
             if "battery" in data:

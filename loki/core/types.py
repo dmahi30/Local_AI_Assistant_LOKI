@@ -37,6 +37,7 @@ class IntentType(str, Enum):
     DETERMINISTIC_SYSTEM = "deterministic_system"
     DETERMINISTIC_MEDIA = "deterministic_media"
     FILE_SEARCH = "file_search"
+    FILE_CREATE = "file_create"
     DOCUMENT_QUERY = "document_query"
     CODE_ASSIST = "code_assist"
     MULTI_STEP_AUTOMATION = "multi_step_automation"
