@@ -57,7 +57,7 @@ def build_tool_selection_prompt(selectable_commands: dict[str, BaseCommand]) -> 
         f"AVAILABLE TOOLS:\n{tools_text}\n\n"
         "STRICT CRITERIA:\n"
         "- ONLY select 'system_info' if the user specifically asks about PC/hardware status: battery, RAM/memory, CPU, or storage/disk.\n"
-        "- ONLY select 'file_search' if the user asks to find, locate, or search for files or documents on disk.\n"
+        "- ONLY select 'file_search' if the user asks to find, locate, search for, or list files or folders on disk.\n"
         "- For ALL OTHER requests (including conversational chat, arithmetic/math like 'what is 25+17', personal questions like 'what is my favorite color', writing, or general knowledge), you MUST respond with: {\"tool\": \"none\"}.\n\n"
         "RESPONSE FORMAT:\n"
         "Respond with ONLY a raw JSON object:\n"
@@ -107,7 +107,10 @@ def parse_and_validate_tool_call(
         (None, None) if the model deliberately chose "none" (conversational).
         (None, error_reason) if parsing or validation failed.
     """
-    data = extract_json_object(raw_text)
+    if isinstance(raw_text, dict):
+        data = raw_text
+    else:
+        data = extract_json_object(raw_text)
     if data is None:
         return None, "Output did not contain a valid JSON object."
 
@@ -157,8 +160,8 @@ def parse_and_validate_tool_call(
         elif tool_name == "file_search":
             search_keywords = (
                 "file", "files", "document", "documents", "find", "search", "locate", "look for",
-                "where is", "show me", "folder", "directory", ".txt", ".pdf", ".docx", ".log",
-                ".csv", ".py", ".md", ".json", ".zip"
+                "where is", "show me", "folder", "folders", "directory", "directories", "list", "contents",
+                ".txt", ".pdf", ".docx", ".log", ".csv", ".py", ".md", ".json", ".zip"
             )
             q_val = str(args.get("query", "")).lower()
             if not any(kw in query_lower for kw in search_keywords) and (q_val not in query_lower):
@@ -173,17 +176,29 @@ def parse_and_validate_tool_call(
 
             # Verify safe read root if gatekeeper is present
             if gatekeeper is not None:
-                user_home = Path.home()
+                user_home = Path.home().resolve()
+                project_root = Path(__file__).resolve().parents[2]
                 alias_map = {
                     "downloads": user_home / "Downloads",
                     "download": user_home / "Downloads",
                     "documents": user_home / "Documents",
                     "docs": user_home / "Documents",
+                    "doc": user_home / "Documents",
                     "desktop": user_home / "Desktop",
                     "pictures": user_home / "Pictures",
+                    "pics": user_home / "Pictures",
+                    "images": user_home / "Pictures",
                     "videos": user_home / "Videos",
+                    "vids": user_home / "Videos",
+                    "music": user_home / "Music",
+                    "project": project_root,
+                    "loki project": project_root,
+                    "loki": project_root,
+                    "workspace": project_root,
                 }
-                resolved_loc = alias_map.get(location.lower(), Path(location).resolve())
+                loc_clean = re.sub(r"^(?:my|the)\s+", "", location.strip(), flags=re.IGNORECASE).strip()
+                loc_clean = re.sub(r"\s+(?:folder|directory|dir)$", "", loc_clean, flags=re.IGNORECASE).strip()
+                resolved_loc = alias_map.get(loc_clean.lower(), Path(loc_clean).resolve())
                 if not gatekeeper.is_path_safe_for_read(resolved_loc):
                     return None, f"Location '{location}' is restricted or outside safe read roots."
 

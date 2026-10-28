@@ -192,6 +192,24 @@ class LokiAgent:
             if "storage" in data:
                 s = data["storage"]
                 return f"Storage ({s.get('drive')}): {s.get('free_gb')} GB free of {s.get('total_gb')} GB"
+            if "matches" in data and "matches_count" in data:
+                count = data["matches_count"]
+                if count == 0:
+                    q = data.get("query")
+                    query_desc = f" for '{q}'" if q and q != "*" else ""
+                    return f"No items found{query_desc}."
+                lines = [f"Found {count} item{'s' if count != 1 else ''}:"]
+                for m in data["matches"][:15]:
+                    item_type = m.get("type", "file")
+                    name = m.get("name") or m.get("filename", "unknown")
+                    if item_type == "directory":
+                        lines.append(f"- [Folder] {name} ({m.get('path')})")
+                    else:
+                        size = f"{m.get('size_mb', 0.0)} MB"
+                        lines.append(f"- [File] {name} ({size}, modified {m.get('modified')})")
+                if count > 15:
+                    lines.append(f"... and {count - 15} more items.")
+                return "\n".join(lines)
             return ", ".join(f"{k}: {v}" for k, v in data.items())
         if isinstance(data, list):
             if not data:
