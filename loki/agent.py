@@ -119,6 +119,7 @@ class LokiAgent:
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         self.allow_fallback = allow_fallback
         self.active_conversation_id = active_conversation_id
+        self.memory_enabled: bool = True
         self.max_history_messages = (
             getattr(self.config.models, "max_history_messages", 20)
             if self.config and hasattr(self.config, "models")
@@ -629,7 +630,7 @@ class LokiAgent:
 
         # 1.5. Retrieve up to 3 relevant memories for personalization
         relevant_memories: list[Any] = []
-        if self.memory_store is not None:
+        if getattr(self, "memory_enabled", True) and self.memory_store is not None:
             try:
                 relevant_memories = self.memory_store.retrieve_relevant_memories(
                     query=clean_input,

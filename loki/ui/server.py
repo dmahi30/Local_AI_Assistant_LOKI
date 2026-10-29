@@ -28,6 +28,8 @@ from ..storage import (
     ConversationSummary,
     MessageRecord,
 )
+from ..storage.memory import MemoryStore
+from ..core.exceptions import InvalidMemoryError, MemoryNotFoundError
 
 logger = get_logger("ui.server")
 
@@ -72,6 +74,28 @@ class UpdateConversationRequest(BaseModel):
     title: str = Field(..., min_length=1, description="Updated conversation title")
 
 
+
+class SettingsUpdateRequest(BaseModel):
+    """Payload for updating UI and agent settings."""
+    memory_enabled: bool = Field(..., description="Whether to inject memories into conversational context")
+
+
+class MemoryCreateRequest(BaseModel):
+    """Payload for creating a persistent memory item."""
+    content: str = Field(..., min_length=1, description="Memory content text")
+    category: str = Field(default="preference", description="Memory category")
+    key: str | None = Field(default=None, description="Optional lookup key")
+    is_pinned: bool = Field(default=False, description="Whether memory is pinned")
+
+
+class MemoryUpdateRequest(BaseModel):
+    """Payload for updating a persistent memory item."""
+    content: str | None = Field(default=None, description="Updated content")
+    category: str | None = Field(default=None, description="Updated category")
+    key: str | None = Field(default=None, description="Updated key")
+    is_pinned: bool | None = Field(default=None, description="Updated pinned state")
+
+
 def create_ui_app(
     agent: LokiAgent | None = None,
     storage: ConversationStore | None = None,
@@ -82,6 +106,8 @@ def create_ui_app(
     if conv_store is None:
         conv_store = ConversationStore()
     loki_agent.storage = conv_store
+    if getattr(loki_agent, "memory_store", None) is None:
+        loki_agent.memory_store = MemoryStore(db_path=conv_store.db_path)
 
     app = FastAPI(
         title="LOKI Desktop Assistant",
@@ -424,6 +450,184 @@ def create_ui_app(
             "path": str(staged_path.resolve()),
             "size_bytes": len(content),
         }
+
+
+    # =========================================================================
+    # Document Library API Endpoints
+    # =========================================================================
+    @app.get("/api/documents")
+    def list_documents() -> dict[str, Any]:
+        """List staged documents available in local attachments storage."""
+        from ..utils.paths import get_data_dir
+        from datetime import datetime, timezone
+
+        attachments_dir = get_data_dir() / "attachments"
+        if not attachments_dir.exists():
+            return {"documents": []}
+
+        docs = []
+        try:
+            for item in sorted(attachments_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+                if item.is_file():
+                    stat = item.stat()
+                    name = item.name
+                    display_name = name.split("_", 1)[1] if "_" in name else name
+                    ext = item.suffix.lower()
+                    if ext in {".txt", ".pdf", ".csv", ".md"}:
+                        docs.append({
+                            "id": item.name,
+                            "filename": display_name,
+                            "path": str(item.resolve()),
+                            "size_bytes": stat.st_size,
+                            "extension": ext,
+                            "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                        })
+        except OSError as e:
+            logger.warning("Failed to scan documents directory: %s", e)
+
+        return {"documents": docs}
+
+    @app.delete("/api/documents/{doc_identifier}")
+    def delete_document(doc_identifier: str) -> dict[str, Any]:
+        """Safely delete a staged document from local attachments storage."""
+        from ..utils.paths import get_data_dir
+
+        if not doc_identifier or "/" in doc_identifier or "\\" in doc_identifier or ".." in doc_identifier:
+            raise HTTPException(status_code=400, detail="Invalid document identifier.")
+
+        attachments_dir = (get_data_dir() / "attachments").resolve()
+        target_path = (attachments_dir / doc_identifier).resolve()
+
+        try:
+            target_path.relative_to(attachments_dir)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Path traversal not permitted.")
+
+        if not target_path.exists() or not target_path.is_file():
+            raise HTTPException(status_code=404, detail=f"Document '{doc_identifier}' not found.")
+
+        try:
+            target_path.unlink()
+        except OSError as e:
+            logger.error("Failed to delete document '%s': %s", doc_identifier, e)
+            raise HTTPException(status_code=500, detail=f"Failed to delete document: {e}")
+
+        return {"success": True, "message": f"Document '{doc_identifier}' deleted."}
+
+    # =========================================================================
+    # Settings & Memory Management API Endpoints
+    # =========================================================================
+    @app.get("/api/settings")
+    def get_settings() -> dict[str, Any]:
+        """Fetch current agent configuration settings."""
+        return {
+            "memory_enabled": getattr(loki_agent, "memory_enabled", True),
+            "offline_mode_enforced": getattr(loki_agent.config, "offline_mode_enforced", True),
+            "active_model": loki_agent.config.models.active_model,
+        }
+
+    @app.patch("/api/settings")
+    def update_settings(req: SettingsUpdateRequest) -> dict[str, Any]:
+        """Update runtime assistant settings."""
+        loki_agent.memory_enabled = req.memory_enabled
+        return {
+            "success": True,
+            "memory_enabled": loki_agent.memory_enabled,
+        }
+
+    @app.get("/api/memories")
+    def list_memories(
+        query: str | None = None,
+        category: str | None = None,
+    ) -> dict[str, Any]:
+        """List or search persistent user memories."""
+        if loki_agent.memory_store is None:
+            return {"memories": [], "count": 0}
+
+        try:
+            if query and query.strip():
+                records = loki_agent.memory_store.search_memories(
+                    query=query.strip(),
+                    category=category.strip().lower() if category else None,
+                    limit=100,
+                )
+            else:
+                records = loki_agent.memory_store.list_memories(
+                    category=category.strip().lower() if category else None,
+                    limit=100,
+                )
+            return {
+                "memories": [r.model_dump() for r in records],
+                "count": len(records),
+            }
+        except Exception as e:
+            logger.error("Error retrieving memories: %s", e)
+            raise HTTPException(status_code=500, detail=f"Failed to retrieve memories: {e}")
+
+    @app.post("/api/memories")
+    def create_memory(req: MemoryCreateRequest) -> dict[str, Any]:
+        """Store a new user memory item."""
+        if loki_agent.memory_store is None:
+            raise HTTPException(status_code=503, detail="Memory store is not available.")
+
+        try:
+            record = loki_agent.memory_store.store_memory(
+                content=req.content,
+                category=req.category,
+                key=req.key,
+                is_pinned=req.is_pinned,
+                source_type="ui",
+            )
+            return {"success": True, "memory": record.model_dump()}
+        except InvalidMemoryError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error("Error storing memory: %s", e)
+            raise HTTPException(status_code=500, detail=f"Failed to store memory: {e}")
+
+    @app.patch("/api/memories/{memory_id}")
+    def update_memory(memory_id: str, req: MemoryUpdateRequest) -> dict[str, Any]:
+        """Update an existing persistent memory item."""
+        if loki_agent.memory_store is None:
+            raise HTTPException(status_code=503, detail="Memory store is not available.")
+
+        try:
+            record = loki_agent.memory_store.update_memory(
+                memory_id=memory_id,
+                content=req.content,
+                category=req.category,
+                key=req.key,
+                is_pinned=req.is_pinned,
+            )
+            return {"success": True, "memory": record.model_dump()}
+        except MemoryNotFoundError:
+            raise HTTPException(status_code=404, detail=f"Memory '{memory_id}' not found.")
+        except InvalidMemoryError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error("Error updating memory: %s", e)
+            raise HTTPException(status_code=500, detail=f"Failed to update memory: {e}")
+
+    @app.delete("/api/memories/{memory_id}")
+    def delete_memory(memory_id: str) -> dict[str, Any]:
+        """Delete a single memory item by identifier."""
+        if loki_agent.memory_store is None:
+            raise HTTPException(status_code=503, detail="Memory store is not available.")
+
+        deleted = loki_agent.memory_store.delete_memory(memory_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Memory '{memory_id}' not found.")
+
+        return {"success": True, "message": f"Memory '{memory_id}' deleted."}
+
+    @app.post("/api/memories/clear")
+    def clear_memories() -> dict[str, Any]:
+        """Delete all stored memories."""
+        if loki_agent.memory_store is None:
+            raise HTTPException(status_code=503, detail="Memory store is not available.")
+
+        count = loki_agent.memory_store.clear_memories()
+        return {"success": True, "deleted_count": count, "message": "All memories cleared."}
 
     # =========================================================================
     # Static Asset Serving (Zero-External-Network)

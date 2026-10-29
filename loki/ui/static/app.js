@@ -38,6 +38,11 @@ function initLokiApp() {
   const attachmentSize = document.getElementById("attachmentSize");
   const removeAttachmentBtn = document.getElementById("removeAttachmentBtn");
   let currentAttachmentFile = null;
+  let currentAttachmentPayload = null;
+  let activeTab = "chat";
+  let libraryDocuments = [];
+  let storedMemories = [];
+  let editingMemoryId = null;
 
   // Drawer Elements
   const drawerOllamaBadge = document.getElementById("drawerOllamaBadge");
@@ -109,13 +114,14 @@ function initLokiApp() {
   }
 
   if (closeDrawerBtn) closeDrawerBtn.addEventListener("click", closeDrawer);
-  if (navSettingsBtn) navSettingsBtn.addEventListener("click", openDrawer);
+  if (navSettingsBtn) navSettingsBtn.addEventListener("click", () => openSettingsModal());
   if (refreshStatusBtn) refreshStatusBtn.addEventListener("click", fetchStatus);
 
   // New Chat and Clear Actions
   if (newChatBtn) {
     newChatBtn.addEventListener("click", (e) => {
       e.preventDefault();
+      switchTab("chat");
       createNewConversation();
     });
   }
@@ -197,6 +203,7 @@ function initLokiApp() {
   // File Attachment Handling
   function clearAttachment() {
     currentAttachmentFile = null;
+    currentAttachmentPayload = null;
     if (filePicker) filePicker.value = "";
     if (attachmentPreview) attachmentPreview.style.display = "none";
   }
@@ -302,7 +309,7 @@ function initLokiApp() {
       e.preventDefault();
       if (!messageInput) return;
       const text = messageInput.value.trim();
-      if ((text || currentAttachmentFile) && !isInferring) {
+      if ((text || currentAttachmentFile || currentAttachmentPayload) && !isInferring) {
         submitMessage(text);
       }
     });
@@ -448,6 +455,7 @@ function initLokiApp() {
         if (e.target.closest(".recent-actions") || e.target.closest(".recent-edit-input")) {
           return;
         }
+        switchTab("chat");
         if (conv.id !== activeConversationId) {
           selectConversation(conv.id);
         }
@@ -679,6 +687,7 @@ function initLokiApp() {
   // =========================================================================
   async function submitMessage(text) {
     const fileToUpload = currentAttachmentFile;
+    let uploadedPayload = currentAttachmentPayload;
     // Clear composer attachment selection immediately
     clearAttachment();
 
@@ -693,10 +702,8 @@ function initLokiApp() {
       emptyState.style.display = "none";
     }
 
-    let uploadedPayload = null;
-
     // Stage attachment file to backend if attached
-    if (fileToUpload) {
+    if (fileToUpload && !uploadedPayload) {
       const uploadLoadingElem = appendLoadingIndicator();
       scrollToBottom();
       try {
@@ -1112,6 +1119,772 @@ function initLokiApp() {
       drawerCpuText.textContent = `${data.cpu_percent}% across ${data.cpu_cores} cores`;
       drawerCpuBar.style.width = `${Math.min(data.cpu_percent, 100)}%`;
     }
+  }
+
+
+  // =========================================================================
+  // VIEW PANELS & TAB CONTROLLER
+  // =========================================================================
+  const chatView = document.getElementById("chatView");
+  const exploreView = document.getElementById("exploreView");
+  const libraryView = document.getElementById("libraryView");
+  const navTabs = document.querySelectorAll(".nav-menu .nav-item[data-tab]");
+
+  function switchTab(tabName) {
+    activeTab = tabName;
+    navTabs.forEach((btn) => {
+      if (btn.dataset.tab === tabName) {
+        btn.classList.add("active");
+      } else {
+        btn.classList.remove("active");
+      }
+    });
+
+    if (chatView) chatView.style.display = (tabName === "chat") ? "flex" : "none";
+    if (exploreView) exploreView.style.display = (tabName === "explore") ? "flex" : "none";
+    if (libraryView) libraryView.style.display = (tabName === "library") ? "flex" : "none";
+
+    if (chatView) {
+      if (tabName === "chat") chatView.classList.add("active");
+      else chatView.classList.remove("active");
+    }
+    if (exploreView) {
+      if (tabName === "explore") exploreView.classList.add("active");
+      else exploreView.classList.remove("active");
+    }
+    if (libraryView) {
+      if (tabName === "library") libraryView.classList.add("active");
+      else libraryView.classList.remove("active");
+    }
+
+    if (tabName === "library") {
+      loadLibraryDocuments();
+    } else if (tabName === "explore") {
+      renderExploreCapabilities();
+    } else if (tabName === "chat") {
+      if (messageInput) messageInput.focus();
+    }
+  }
+
+  navTabs.forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      const tab = btn.dataset.tab;
+      if (tab) switchTab(tab);
+    });
+  });
+
+  // =========================================================================
+  // EXPLORE CAPABILITIES CONTROLLER
+  // =========================================================================
+  const AVAILABLE_CAPABILITIES = [
+    {
+      id: "ai_chat",
+      icon: "🧠",
+      title: "Local AI Chat & Reasoning",
+      tag: "Ready",
+      desc: "Conversational intelligence running 100% locally via Ollama with complete privacy and zero data leakage.",
+      actionLabel: "Try Chat Prompt",
+      actionType: "prompt",
+      actionValue: "Explain the architectural advantages of local offline AI.",
+    },
+    {
+      id: "telemetry",
+      icon: "⚡",
+      title: "Local System Telemetry",
+      tag: "Ready",
+      desc: "Deterministic zero-LLM monitoring of CPU load, RAM allocation, battery percentage, and disk storage.",
+      actionLabel: "Check Battery",
+      actionType: "prompt",
+      actionValue: "what is my battery percentage",
+    },
+    {
+      id: "file_search",
+      icon: "🔍",
+      title: "Safe File Discovery",
+      tag: "Ready",
+      desc: "Instant local search for files and folders strictly constrained within user-approved search roots.",
+      actionLabel: "Search Files",
+      actionType: "prompt",
+      actionValue: "find file report.pdf",
+    },
+    {
+      id: "file_create",
+      icon: "📝",
+      title: "Safe File & Folder Creation",
+      tag: "Ready",
+      desc: "Create new files and directories deterministically with strict boundary validation and safety checks.",
+      actionLabel: "Create File",
+      actionType: "prompt",
+      actionValue: "create file notes.txt with hello world",
+    },
+    {
+      id: "file_delete",
+      icon: "🛡️",
+      title: "Gated Destructive Operations",
+      tag: "Ready",
+      desc: "Destructive operations are fail-closed and require an explicit single-use cryptographic confirmation token.",
+      actionLabel: "Learn Safety Flow",
+      actionType: "prompt",
+      actionValue: "How does Loki protect my files with confirmation tokens?",
+    },
+    {
+      id: "doc_intel",
+      icon: "📄",
+      title: "Document Intelligence",
+      tag: "Ready",
+      desc: "Offline text extraction and grounded summarization for PDF, TXT, CSV, and Markdown files.",
+      actionLabel: "Open Library",
+      actionType: "library",
+    },
+    {
+      id: "memory_store",
+      icon: "💾",
+      title: "Persistent User Memory",
+      tag: "Ready",
+      desc: "Deterministic SQLite memory store remembering user preferences and personal facts across sessions.",
+      actionLabel: "Manage Memories",
+      actionType: "settings_memory",
+    },
+    {
+      id: "memory_aware",
+      icon: "🎯",
+      title: "Memory-Aware Responses",
+      tag: "Ready",
+      desc: "Contextually personalizes LLM responses by injecting relevant saved facts into system prompts.",
+      actionLabel: "Query Memory",
+      actionType: "prompt",
+      actionValue: "What do you remember about me?",
+    },
+    {
+      id: "app_launcher",
+      icon: "🚀",
+      title: "Application Launcher",
+      tag: "Ready",
+      desc: "Safely launch allowed desktop applications like Notepad, Calculator, or Terminal deterministically.",
+      actionLabel: "Launch Notepad",
+      actionType: "prompt",
+      actionValue: "launch notepad",
+    },
+  ];
+
+  const PLANNED_CAPABILITIES = [
+    {
+      id: "voice_in",
+      icon: "🎤",
+      title: "Offline Voice Input",
+      tag: "Phase 6",
+      desc: "Local, private speech-to-text transcription powered by OpenAI Whisper running entirely on-device.",
+    },
+    {
+      id: "voice_out",
+      icon: "🔊",
+      title: "Neural Voice Synthesis",
+      tag: "Phase 7",
+      desc: "High-performance, offline neural speech synthesis using Piper TTS for natural voice interaction.",
+    },
+    {
+      id: "scheduler",
+      icon: "⏱️",
+      title: "Automated Scheduled Tasks",
+      tag: "Roadmap",
+      desc: "Background recurring schedules, reminders, and automated local workflow triggers.",
+    },
+    {
+      id: "vision",
+      icon: "👁️",
+      title: "Vision & Multimodal QA",
+      tag: "Roadmap",
+      desc: "Local image comprehension, OCR extraction, and visual document reasoning.",
+    },
+    {
+      id: "model_switcher",
+      icon: "🔄",
+      title: "Dynamic Model Switcher",
+      tag: "Roadmap",
+      desc: "Hot-switching between installed local Ollama models tailored for specialized tasks.",
+    },
+  ];
+
+  const availableGrid = document.getElementById("availableCapabilitiesGrid");
+  const plannedGrid = document.getElementById("plannedCapabilitiesGrid");
+  const exploreFilterInput = document.getElementById("exploreFilterInput");
+
+  function renderExploreCapabilities(filter = "") {
+    const q = filter.trim().toLowerCase();
+
+    if (availableGrid) {
+      availableGrid.innerHTML = "";
+      const filteredAvail = q
+        ? AVAILABLE_CAPABILITIES.filter((c) => c.title.toLowerCase().includes(q) || c.desc.toLowerCase().includes(q))
+        : AVAILABLE_CAPABILITIES;
+
+      filteredAvail.forEach((cap) => {
+        const card = document.createElement("div");
+        card.className = "capability-card";
+        card.innerHTML = `
+          <div class="cap-header">
+            <div class="cap-title-group">
+              <span class="cap-icon">${cap.icon}</span>
+              <span class="cap-title">${escapeHtml(cap.title)}</span>
+            </div>
+            <span class="cap-tag ready">${cap.tag}</span>
+          </div>
+          <p class="cap-desc">${escapeHtml(cap.desc)}</p>
+          <div class="cap-footer">
+            <button type="button" class="cap-action-btn" data-cap-id="${cap.id}">
+              <span>${escapeHtml(cap.actionLabel)}</span>
+              <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
+          </div>
+        `;
+
+        const btn = card.querySelector(".cap-action-btn");
+        if (btn) {
+          btn.addEventListener("click", () => {
+            if (cap.actionType === "prompt") {
+              switchTab("chat");
+              if (messageInput) {
+                messageInput.value = cap.actionValue;
+                submitMessage(cap.actionValue);
+              }
+            } else if (cap.actionType === "library") {
+              switchTab("library");
+            } else if (cap.actionType === "settings_memory") {
+              openSettingsModal();
+            }
+          });
+        }
+        availableGrid.appendChild(card);
+      });
+    }
+
+    if (plannedGrid) {
+      plannedGrid.innerHTML = "";
+      const filteredPlanned = q
+        ? PLANNED_CAPABILITIES.filter((c) => c.title.toLowerCase().includes(q) || c.desc.toLowerCase().includes(q))
+        : PLANNED_CAPABILITIES;
+
+      filteredPlanned.forEach((cap) => {
+        const card = document.createElement("div");
+        card.className = "capability-card planned-card";
+        card.innerHTML = `
+          <div class="cap-header">
+            <div class="cap-title-group">
+              <span class="cap-icon">${cap.icon}</span>
+              <span class="cap-title">${escapeHtml(cap.title)}</span>
+            </div>
+            <span class="cap-tag planned">${cap.tag}</span>
+          </div>
+          <p class="cap-desc">${escapeHtml(cap.desc)}</p>
+        `;
+        plannedGrid.appendChild(card);
+      });
+    }
+  }
+
+  if (exploreFilterInput) {
+    exploreFilterInput.addEventListener("input", (e) => {
+      renderExploreCapabilities(e.target.value);
+    });
+  }
+
+  // =========================================================================
+  // DOCUMENT LIBRARY CONTROLLER
+  // =========================================================================
+  const libraryContainer = document.getElementById("libraryContainer");
+  const libraryDocCount = document.getElementById("libraryDocCount");
+  const libraryFileInput = document.getElementById("libraryFileInput");
+  const libraryUploadBtn = document.getElementById("libraryUploadBtn");
+  const refreshLibraryBtn = document.getElementById("refreshLibraryBtn");
+  const librarySearchInput = document.getElementById("librarySearchInput");
+
+  async function loadLibraryDocuments() {
+    try {
+      const res = await fetch("/api/documents");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      libraryDocuments = data.documents || [];
+      renderLibraryDocuments(librarySearchInput ? librarySearchInput.value : "");
+    } catch (e) {
+      console.warn("[LOKI UI] Failed to load documents library:", e);
+      if (libraryContainer) {
+        libraryContainer.innerHTML = `
+          <div class="library-empty">
+            <span class="library-empty-title">Error loading library</span>
+            <span class="library-empty-desc">${escapeHtml(e.message)}</span>
+          </div>
+        `;
+      }
+    }
+  }
+
+  function renderLibraryDocuments(filter = "") {
+    if (!libraryContainer) return;
+    const q = filter.trim().toLowerCase();
+    const filtered = q
+      ? libraryDocuments.filter((d) => (d.filename || "").toLowerCase().includes(q))
+      : libraryDocuments;
+
+    if (libraryDocCount) {
+      libraryDocCount.textContent = `${filtered.length} document${filtered.length === 1 ? "" : "s"}`;
+    }
+
+    if (filtered.length === 0) {
+      libraryContainer.innerHTML = `
+        <div class="library-empty">
+          <div class="library-empty-icon">
+            <svg viewBox="0 0 24 24" width="28" height="28" stroke="currentColor" stroke-width="2" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          </div>
+          <span class="library-empty-title">${q ? "No matching documents" : "No documents in library"}</span>
+          <span class="library-empty-desc">
+            ${q ? "Try clearing your search query." : "Upload a .txt, .pdf, .csv, or .md document to analyze it locally with LOKI."}
+          </span>
+        </div>
+      `;
+      return;
+    }
+
+    const grid = document.createElement("div");
+    grid.className = "documents-grid";
+
+    filtered.forEach((doc) => {
+      const ext = (doc.extension || "").replace(".", "").toLowerCase();
+      const card = document.createElement("div");
+      card.className = "document-card";
+      card.dataset.docId = doc.id;
+
+      card.innerHTML = `
+        <div class="doc-top">
+          <div class="doc-icon-wrapper ${ext}">${ext || "doc"}</div>
+          <div class="doc-info">
+            <div class="doc-name" title="${escapeHtml(doc.filename)}">${escapeHtml(doc.filename)}</div>
+            <div class="doc-meta">${formatBytes(doc.size_bytes)} • ${formatRelativeTime(doc.modified_at)}</div>
+          </div>
+        </div>
+        <div class="doc-actions">
+          <button type="button" class="doc-btn analyze-btn" title="Analyze document in chat">
+            <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <span>Analyze in Chat</span>
+          </button>
+          <button type="button" class="doc-btn delete-btn" title="Delete document">
+            <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            <span>Delete</span>
+          </button>
+        </div>
+      `;
+
+      const analyzeBtn = card.querySelector(".analyze-btn");
+      if (analyzeBtn) {
+        analyzeBtn.addEventListener("click", () => {
+          stageLibraryDocumentForChat(doc);
+        });
+      }
+
+      const deleteBtn = card.querySelector(".delete-btn");
+      if (deleteBtn) {
+        deleteBtn.addEventListener("click", () => {
+          deleteLibraryDocument(doc.id, doc.filename);
+        });
+      }
+
+      grid.appendChild(card);
+    });
+
+    libraryContainer.innerHTML = "";
+    libraryContainer.appendChild(grid);
+  }
+
+  function stageLibraryDocumentForChat(doc) {
+    switchTab("chat");
+    currentAttachmentPayload = {
+      filename: doc.filename,
+      path: doc.path,
+      size_bytes: doc.size_bytes,
+    };
+    currentAttachmentFile = null;
+
+    if (attachmentName) attachmentName.textContent = doc.filename;
+    if (attachmentSize) attachmentSize.textContent = formatBytes(doc.size_bytes);
+    if (attachmentPreview) attachmentPreview.style.display = "flex";
+
+    if (messageInput) {
+      messageInput.value = `Summarize ${doc.filename}.`;
+      messageInput.focus();
+    }
+  }
+
+  async function deleteLibraryDocument(docId, filename) {
+    const confirmed = window.confirm(`Delete document "${filename}" from local library? This cannot be undone.`);
+    if (!confirmed) return;
+
+    try {
+      const res = await fetch(`/api/documents/${encodeURIComponent(docId)}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        await loadLibraryDocuments();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`Failed to delete document: ${err.detail || res.statusText}`);
+      }
+    } catch (e) {
+      alert(`Error deleting document: ${e.message}`);
+    }
+  }
+
+  if (libraryUploadBtn && libraryFileInput) {
+    libraryUploadBtn.addEventListener("click", () => {
+      libraryFileInput.click();
+    });
+
+    libraryFileInput.addEventListener("change", async () => {
+      if (!libraryFileInput.files || libraryFileInput.files.length === 0) return;
+      const file = libraryFileInput.files[0];
+      const formData = new FormData();
+      formData.append("file", file);
+
+      try {
+        const res = await fetch("/api/upload", {
+          method: "POST",
+          body: formData,
+        });
+        if (res.ok) {
+          libraryFileInput.value = "";
+          await loadLibraryDocuments();
+        } else {
+          const err = await res.json().catch(() => ({}));
+          alert(`Upload failed: ${err.detail || res.statusText}`);
+        }
+      } catch (e) {
+        alert(`Upload failed: ${e.message}`);
+      }
+    });
+  }
+
+  if (refreshLibraryBtn) {
+    refreshLibraryBtn.addEventListener("click", () => {
+      loadLibraryDocuments();
+    });
+  }
+
+  if (librarySearchInput) {
+    librarySearchInput.addEventListener("input", (e) => {
+      renderLibraryDocuments(e.target.value);
+    });
+  }
+
+  // =========================================================================
+  // SETTINGS & MEMORY MANAGEMENT CONTROLLER
+  // =========================================================================
+  const settingsModal = document.getElementById("settingsModal");
+  const closeSettingsModalBtn = document.getElementById("closeSettingsModalBtn");
+  const settingsTabMemory = document.getElementById("settingsTabMemory");
+  const settingsTabDiagnostics = document.getElementById("settingsTabDiagnostics");
+  const settingsMemoryPanel = document.getElementById("settingsMemoryPanel");
+  const settingsDiagnosticsPanel = document.getElementById("settingsDiagnosticsPanel");
+
+  const memoryEnabledToggle = document.getElementById("memoryEnabledToggle");
+  const memoryCountBadge = document.getElementById("memoryCountBadge");
+  const memorySearchInput = document.getElementById("memorySearchInput");
+  const showAddMemoryBtn = document.getElementById("showAddMemoryBtn");
+  const memoryFormCard = document.getElementById("memoryFormCard");
+  const memoryFormTitle = document.getElementById("memoryFormTitle");
+  const memoryCategorySelect = document.getElementById("memoryCategorySelect");
+  const memoryKeyInput = document.getElementById("memoryKeyInput");
+  const memoryContentInput = document.getElementById("memoryContentInput");
+  const cancelMemoryFormBtn = document.getElementById("cancelMemoryFormBtn");
+  const saveMemoryFormBtn = document.getElementById("saveMemoryFormBtn");
+  const memoryFormError = document.getElementById("memoryFormError");
+  const memoriesList = document.getElementById("memoriesList");
+  const clearAllMemoriesBtn = document.getElementById("clearAllMemoriesBtn");
+
+  const settingsOllamaStatus = document.getElementById("settingsOllamaStatus");
+  const settingsActiveModel = document.getElementById("settingsActiveModel");
+  const settingsRamText = document.getElementById("settingsRamText");
+  const settingsCpuText = document.getElementById("settingsCpuText");
+
+  async function openSettingsModal() {
+    if (settingsModal) {
+      settingsModal.style.display = "flex";
+      await loadSettings();
+      await loadMemories();
+    }
+  }
+
+  function closeSettingsModal() {
+    if (settingsModal) {
+      settingsModal.style.display = "none";
+      if (memoryFormCard) memoryFormCard.style.display = "none";
+      editingMemoryId = null;
+    }
+  }
+
+  if (closeSettingsModalBtn) closeSettingsModalBtn.addEventListener("click", closeSettingsModal);
+  if (settingsModal) {
+    settingsModal.addEventListener("click", (e) => {
+      if (e.target === settingsModal) closeSettingsModal();
+    });
+  }
+
+  if (settingsTabMemory && settingsTabDiagnostics) {
+    settingsTabMemory.addEventListener("click", () => {
+      settingsTabMemory.classList.add("active");
+      settingsTabDiagnostics.classList.remove("active");
+      if (settingsMemoryPanel) settingsMemoryPanel.style.display = "flex";
+      if (settingsDiagnosticsPanel) settingsDiagnosticsPanel.style.display = "none";
+    });
+
+    settingsTabDiagnostics.addEventListener("click", () => {
+      settingsTabDiagnostics.classList.add("active");
+      settingsTabMemory.classList.remove("active");
+      if (settingsDiagnosticsPanel) settingsDiagnosticsPanel.style.display = "flex";
+      if (settingsMemoryPanel) settingsMemoryPanel.style.display = "none";
+    });
+  }
+
+  async function loadSettings() {
+    try {
+      const res = await fetch("/api/settings");
+      if (res.ok) {
+        const data = await res.json();
+        if (memoryEnabledToggle) {
+          memoryEnabledToggle.checked = !!data.memory_enabled;
+        }
+        if (settingsActiveModel) settingsActiveModel.textContent = data.active_model || "—";
+      }
+    } catch (e) {
+      console.warn("Failed to load settings:", e);
+    }
+
+    try {
+      const sRes = await fetch("/api/status");
+      if (sRes.ok) {
+        const sData = await sRes.json();
+        if (settingsOllamaStatus) {
+          settingsOllamaStatus.textContent = sData.ollama_online ? `Online (${sData.ollama_version || "connected"})` : "Offline";
+        }
+        if (settingsRamText && sData.ram_used_gb !== undefined) {
+          settingsRamText.textContent = `${sData.ram_used_gb} GB / ${sData.ram_total_gb} GB (${sData.ram_percent}%)`;
+        }
+        if (settingsCpuText && sData.cpu_percent !== undefined) {
+          settingsCpuText.textContent = `${sData.cpu_percent}% across ${sData.cpu_cores} cores`;
+        }
+      }
+    } catch {}
+  }
+
+  if (memoryEnabledToggle) {
+    memoryEnabledToggle.addEventListener("change", async () => {
+      const enabled = memoryEnabledToggle.checked;
+      try {
+        await fetch("/api/settings", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ memory_enabled: enabled }),
+        });
+      } catch (e) {
+        console.warn("Failed to update memory setting:", e);
+      }
+    });
+  }
+
+  async function loadMemories(query = "") {
+    try {
+      const url = query ? `/api/memories?query=${encodeURIComponent(query)}` : "/api/memories";
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        storedMemories = data.memories || [];
+        renderMemoriesList(storedMemories);
+      }
+    } catch (e) {
+      console.warn("Failed to fetch memories:", e);
+    }
+  }
+
+  function renderMemoriesList(memories) {
+    if (!memoriesList) return;
+    if (memoryCountBadge) {
+      memoryCountBadge.textContent = `${memories.length} memor${memories.length === 1 ? "y" : "ies"}`;
+    }
+
+    if (memories.length === 0) {
+      memoriesList.innerHTML = `
+        <div class="memory-empty-state">
+          No memories stored yet. You can tell LOKI "Remember that..." in chat, or click "+ Add Memory" above.
+        </div>
+      `;
+      return;
+    }
+
+    memoriesList.innerHTML = "";
+    memories.forEach((mem) => {
+      const card = document.createElement("div");
+      card.className = "memory-card";
+      card.dataset.memoryId = mem.id;
+
+      card.innerHTML = `
+        <div class="mem-header">
+          <div class="mem-tags">
+            <span class="mem-category-badge">${escapeHtml(mem.category)}</span>
+            ${mem.key ? `<span class="mem-key">${escapeHtml(mem.key)}</span>` : ""}
+          </div>
+          <div class="mem-actions">
+            <button type="button" class="mem-btn edit" title="Edit memory">
+              <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+            </button>
+            <button type="button" class="mem-btn delete" title="Delete memory">
+              <svg viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="mem-content">${escapeHtml(mem.content)}</div>
+        <div class="mem-time">${formatRelativeTime(mem.updated_at)}</div>
+      `;
+
+      const editBtn = card.querySelector(".mem-btn.edit");
+      if (editBtn) {
+        editBtn.addEventListener("click", () => {
+          startEditMemory(mem);
+        });
+      }
+
+      const delBtn = card.querySelector(".mem-btn.delete");
+      if (delBtn) {
+        delBtn.addEventListener("click", () => {
+          deleteSingleMemory(mem.id, mem.content);
+        });
+      }
+
+      memoriesList.appendChild(card);
+    });
+  }
+
+  function startEditMemory(mem) {
+    editingMemoryId = mem.id;
+    if (memoryFormTitle) memoryFormTitle.textContent = "Edit Memory";
+    if (memoryCategorySelect) memoryCategorySelect.value = mem.category || "preference";
+    if (memoryKeyInput) memoryKeyInput.value = mem.key || "";
+    if (memoryContentInput) memoryContentInput.value = mem.content || "";
+    if (memoryFormError) memoryFormError.style.display = "none";
+    if (memoryFormCard) memoryFormCard.style.display = "flex";
+    if (memoryContentInput) memoryContentInput.focus();
+  }
+
+  if (showAddMemoryBtn) {
+    showAddMemoryBtn.addEventListener("click", () => {
+      editingMemoryId = null;
+      if (memoryFormTitle) memoryFormTitle.textContent = "Add New Memory";
+      if (memoryCategorySelect) memoryCategorySelect.value = "preference";
+      if (memoryKeyInput) memoryKeyInput.value = "";
+      if (memoryContentInput) memoryContentInput.value = "";
+      if (memoryFormError) memoryFormError.style.display = "none";
+      if (memoryFormCard) {
+        memoryFormCard.style.display = memoryFormCard.style.display === "none" ? "flex" : "none";
+      }
+      if (memoryContentInput) memoryContentInput.focus();
+    });
+  }
+
+  if (cancelMemoryFormBtn && memoryFormCard) {
+    cancelMemoryFormBtn.addEventListener("click", () => {
+      memoryFormCard.style.display = "none";
+      editingMemoryId = null;
+    });
+  }
+
+  if (saveMemoryFormBtn) {
+    saveMemoryFormBtn.addEventListener("click", async () => {
+      const content = memoryContentInput ? memoryContentInput.value.trim() : "";
+      const category = memoryCategorySelect ? memoryCategorySelect.value : "preference";
+      const key = memoryKeyInput ? memoryKeyInput.value.trim() || null : null;
+
+      if (!content) {
+        if (memoryFormError) {
+          memoryFormError.textContent = "Memory content cannot be empty.";
+          memoryFormError.style.display = "block";
+        }
+        return;
+      }
+
+      try {
+        let res;
+        if (editingMemoryId) {
+          res = await fetch(`/api/memories/${editingMemoryId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content, category, key }),
+          });
+        } else {
+          res = await fetch("/api/memories", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ content, category, key }),
+          });
+        }
+
+        if (res.ok) {
+          if (memoryFormCard) memoryFormCard.style.display = "none";
+          editingMemoryId = null;
+          await loadMemories(memorySearchInput ? memorySearchInput.value : "");
+        } else {
+          const errData = await res.json().catch(() => ({}));
+          if (memoryFormError) {
+            memoryFormError.textContent = errData.detail || "Failed to save memory.";
+            memoryFormError.style.display = "block";
+          }
+        }
+      } catch (err) {
+        if (memoryFormError) {
+          memoryFormError.textContent = err.message || "Network error saving memory.";
+          memoryFormError.style.display = "block";
+        }
+      }
+    });
+  }
+
+  async function deleteSingleMemory(memoryId, snippet) {
+    const preview = snippet.length > 40 ? snippet.slice(0, 40) + "..." : snippet;
+    const confirmed = window.confirm(`Forget memory: "${preview}"?`);
+    if (!confirmed) return;
+
+    try {
+      const res = await fetch(`/api/memories/${memoryId}`, { method: "DELETE" });
+      if (res.ok) {
+        await loadMemories(memorySearchInput ? memorySearchInput.value : "");
+      } else {
+        alert("Failed to delete memory.");
+      }
+    } catch (e) {
+      alert(`Error deleting memory: ${e.message}`);
+    }
+  }
+
+  if (clearAllMemoriesBtn) {
+    clearAllMemoriesBtn.addEventListener("click", async () => {
+      const confirmed = window.confirm(
+        "Are you sure you want to forget ALL stored memories? This cannot be undone."
+      );
+      if (!confirmed) return;
+
+      try {
+        const res = await fetch("/api/memories/clear", { method: "POST" });
+        if (res.ok) {
+          await loadMemories();
+        } else {
+          alert("Failed to clear memories.");
+        }
+      } catch (e) {
+        alert(`Error clearing memories: ${e.message}`);
+      }
+    });
+  }
+
+  if (memorySearchInput) {
+    memorySearchInput.addEventListener("input", (e) => {
+      loadMemories(e.target.value);
+    });
   }
 
   // Initial setup: load conversations and telemetry
