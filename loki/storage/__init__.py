@@ -6,10 +6,20 @@ from .conversation import (
     ConversationSummary,
     MessageRecord,
 )
+from .memory import (
+    MemoryCategory,
+    MemoryRecord,
+    MemorySourceType,
+    MemoryStore,
+)
 
 __all__ = [
     "ConversationDetail",
     "ConversationStore",
     "ConversationSummary",
     "MessageRecord",
+    "MemoryCategory",
+    "MemoryRecord",
+    "MemorySourceType",
+    "MemoryStore",
 ]

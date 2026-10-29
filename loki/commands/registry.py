@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .base import BaseCommand
 from .builtin import (
@@ -12,14 +12,22 @@ from .builtin import (
     FileDeleteCommand,
     FileSearchCommand,
     FolderCreateCommand,
+    MemoryCommand,
     SystemInfoCommand,
 )
+
+if TYPE_CHECKING:
+    from ..storage.memory import MemoryStore
 
 
 class CommandRegistry:
     """Central registry of deterministic commands."""
 
-    def __init__(self, load_defaults: bool = True) -> None:
+    def __init__(
+        self,
+        load_defaults: bool = True,
+        memory_store: MemoryStore | None = None,
+    ) -> None:
         self._commands: dict[str, BaseCommand] = {}
         if load_defaults:
             self.register(SystemInfoCommand())
@@ -29,6 +37,7 @@ class CommandRegistry:
             self.register(FileCreateCommand())
             self.register(FolderCreateCommand())
             self.register(FileDeleteCommand())
+            self.register(MemoryCommand(memory_store=memory_store))
 
     def register(self, command: BaseCommand) -> None:
         """Register a command instance."""

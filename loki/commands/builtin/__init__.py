@@ -5,6 +5,7 @@ from .document_query import DocumentQueryCommand
 from .file_create import FileCreateCommand, FolderCreateCommand
 from .file_delete import FileDeleteCommand
 from .file_search import FileSearchCommand
+from .memory import MemoryCommand
 from .system_info import SystemInfoCommand
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "FileDeleteCommand",
     "FileSearchCommand",
     "FolderCreateCommand",
+    "MemoryCommand",
     "SystemInfoCommand",
 ]

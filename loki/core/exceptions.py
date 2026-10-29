@@ -76,3 +76,11 @@ class StorageError(LokiError):
 
 class ConversationNotFoundError(StorageError):
     """Raised when a requested conversation ID does not exist."""
+
+
+class MemoryNotFoundError(StorageError):
+    """Raised when a requested memory ID does not exist."""
+
+
+class InvalidMemoryError(StorageError):
+    """Raised when memory data or category is invalid or violates security constraints."""

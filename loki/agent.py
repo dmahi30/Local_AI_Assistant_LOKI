@@ -32,7 +32,9 @@ from .core.types import SafetyConfirmationRequest, ToolResult
 from .llm.client import OllamaClient
 from .llm.resolver import ModelResolver
 from .safety.gatekeeper import SafetyGatekeeper
+from .commands.registry import CommandRegistry
 from .storage.conversation import ConversationStore
+from .storage.memory import MemoryStore
 from .utils.paths import get_config_path
 
 logger = get_logger("agent")
@@ -86,6 +88,7 @@ class LokiAgent:
         system_prompt: str | None = None,
         allow_fallback: bool = False,
         storage: ConversationStore | None = None,
+        memory_store: MemoryStore | None = None,
         active_conversation_id: str | None = None,
     ) -> None:
         if config is None:
@@ -99,12 +102,22 @@ class LokiAgent:
                 config = LokiConfig()
         self.config = config
         self.gatekeeper = gatekeeper or SafetyGatekeeper(config=self.config.safety)
-        self.router = router or DeterministicRouter(gatekeeper=self.gatekeeper)
+        self.storage = storage
+        self.memory_store = memory_store or MemoryStore(
+            db_path=self.storage.db_path if self.storage else None
+        )
+        if router is None:
+            registry = CommandRegistry(memory_store=self.memory_store)
+            self.router = DeterministicRouter(registry=registry, gatekeeper=self.gatekeeper)
+        else:
+            self.router = router
+            mem_cmd = self.router.registry.get("memory")
+            if mem_cmd and hasattr(mem_cmd, "memory_store") and memory_store is not None:
+                mem_cmd.memory_store = self.memory_store
         self.client = client or OllamaClient(self.config.models)
         self.resolver = resolver or ModelResolver(config=self.config.models, client=self.client)
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         self.allow_fallback = allow_fallback
-        self.storage = storage
         self.active_conversation_id = active_conversation_id
         self.max_history_messages = (
             getattr(self.config.models, "max_history_messages", 20)
@@ -223,6 +236,8 @@ class LokiAgent:
         if isinstance(data, str):
             return data
         if isinstance(data, dict):
+            if "memory_action" in data:
+                return data.get("message", "Memory operation completed.")
             if "status" in data and data["status"] == "launched":
                 return f"Launched {data.get('app', 'application')} successfully."
             if "created" in data and "type" in data:

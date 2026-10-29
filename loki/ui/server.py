@@ -299,6 +299,8 @@ def create_ui_app(
                     detail="Invalid file deletion confirmation targets.",
                 )
             authorized_message = f"delete {pending.targets[0]}"
+        elif pending.tool_name == "memory":
+            authorized_message = "forget everything you remember"
         else:
             raise HTTPException(
                 status_code=400,

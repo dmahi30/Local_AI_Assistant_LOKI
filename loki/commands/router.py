@@ -58,9 +58,10 @@ class DeterministicRouter:
 
         # If operation is dangerous and confirmation has not yet been approved
         if effective_safety == SafetyLevel.DANGEROUS and not action_id:
+            desc = args.get("description") or f"Request to execute {command.name}"
             pending_req = self.gatekeeper.request_confirmation(
                 tool_name=command.name,
-                description=f"Request to execute {command.name}",
+                description=desc,
                 targets=targets or [],
                 safety_level=effective_safety,
                 conversation_id=conversation_id,

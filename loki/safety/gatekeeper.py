@@ -171,6 +171,11 @@ class SafetyGatekeeper:
         """Evaluate the effective safety level, dynamically escalating if targets are sensitive."""
         effective_level = declared_level
 
+        if tool_name == "memory":
+            if targets and any("all" in str(t).lower() for t in targets):
+                return SafetyLevel.DANGEROUS
+            return declared_level
+
         # If any target path is outside safe areas, escalate to DANGEROUS or block
         if targets:
             for t in targets:
@@ -202,8 +207,11 @@ class SafetyGatekeeper:
         """Create a pending confirmation request for a dangerous operation."""
         self._prune_expired_confirmations()
         action_id = f"act_{uuid.uuid4().hex[:8]}"
-        # Canonicalize target paths
-        canonical_targets = [str(Path(t).resolve()) for t in targets]
+        # Canonicalize target paths (memory targets are logical identifiers, not filesystem paths)
+        if tool_name == "memory":
+            canonical_targets = [str(t) for t in targets]
+        else:
+            canonical_targets = [str(Path(t).resolve()) for t in targets]
         ttl = getattr(self.config, "confirmation_ttl_seconds", 300)
 
         req = SafetyConfirmationRequest(
@@ -251,8 +259,12 @@ class SafetyGatekeeper:
             return False
 
         if expected_targets is not None:
-            req_targets = sorted([str(Path(t).resolve()).lower() for t in req.targets])
-            exp_targets = sorted([str(Path(t).resolve()).lower() for t in expected_targets])
+            if req.tool_name == "memory":
+                req_targets = sorted([str(t).lower() for t in req.targets])
+                exp_targets = sorted([str(t).lower() for t in expected_targets])
+            else:
+                req_targets = sorted([str(Path(t).resolve()).lower() for t in req.targets])
+                exp_targets = sorted([str(Path(t).resolve()).lower() for t in expected_targets])
             if req_targets != exp_targets:
                 logger.warning("Confirmation rejected: targets mismatch for %s", action_id)
                 return False
@@ -353,8 +365,12 @@ class SafetyGatekeeper:
                 )
 
             if targets is not None:
-                req_targets = sorted([str(Path(t).resolve()).lower() for t in req.targets])
-                actual_targets = sorted([str(Path(t).resolve()).lower() for t in targets])
+                if req.tool_name == "memory":
+                    req_targets = sorted([str(t).lower() for t in req.targets])
+                    actual_targets = sorted([str(t).lower() for t in targets])
+                else:
+                    req_targets = sorted([str(Path(t).resolve()).lower() for t in req.targets])
+                    actual_targets = sorted([str(Path(t).resolve()).lower() for t in targets])
                 if req_targets != actual_targets:
                     raise SafetyViolationError(
                         f"Execution blocked: Target mismatch for action '{action_id}'.",
