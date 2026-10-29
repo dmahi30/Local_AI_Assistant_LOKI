@@ -55,6 +55,30 @@ SENSITIVE_CONTENT_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
 ]
 
+# Common English conversational stopwords filtered out during memory retrieval
+COMMON_QUERY_STOPWORDS: set[str] = {
+    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
+    "any", "are", "aren't", "as", "at", "be", "because", "been", "before", "being",
+    "below", "between", "both", "but", "by", "can", "can't", "cannot", "could",
+    "couldn't", "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down",
+    "during", "each", "few", "for", "from", "further", "had", "hadn't", "has",
+    "hasn't", "have", "haven't", "having", "he", "he'd", "he'll", "he's", "her",
+    "here", "here's", "hers", "herself", "him", "himself", "his", "how", "how's",
+    "i", "i'd", "i'll", "i'm", "i've", "if", "in", "into", "is", "isn't", "it",
+    "it's", "its", "itself", "let's", "me", "more", "most", "mustn't", "my",
+    "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other",
+    "ought", "our", "ours", "ourselves", "out", "over", "own", "same", "shan't",
+    "she", "she'd", "she'll", "she's", "should", "shouldn't", "so", "some", "such",
+    "than", "that", "that's", "the", "their", "theirs", "them", "themselves",
+    "then", "there", "there's", "these", "they", "they'd", "they'll", "they're",
+    "they've", "this", "those", "through", "to", "too", "under", "until", "up",
+    "very", "was", "wasn't", "we", "we'd", "we'll", "we're", "we've", "were",
+    "weren't", "what", "what's", "when", "when's", "where", "where's", "which",
+    "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would",
+    "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your", "yours",
+    "yourself", "yourselves", "tell", "please", "help", "know", "think", "give",
+}
+
 
 def _utc_now_iso() -> str:
     """Return current UTC time in ISO 8601 format."""
@@ -735,3 +759,138 @@ class MemoryStore:
                 return results
         except sqlite3.Error as e:
             raise StorageError(f"Memory fallback search failed: {e}") from e
+
+    def retrieve_relevant_memories(
+        self,
+        query: str,
+        limit: int = 3,
+        touch: bool = True,
+    ) -> list[MemoryRecord]:
+        """Retrieve up to `limit` relevant memories for an incoming user query.
+
+        Extracts significant keywords from `query` (filtering out common English stopwords),
+        and matches against memories using FTS5 BM25 ranking (falling back to LIKE if FTS is unavailable).
+        Only returns memories that match at least one significant keyword.
+
+        Args:
+            query: The user prompt or question text.
+            limit: Maximum memories to return (bounded between 1 and 3).
+            touch: Whether to update last_accessed_at on returned records.
+
+        Returns:
+            List of relevant MemoryRecord objects (up to `limit`), ordered by relevance.
+        """
+        clean_query = query.strip() if query else ""
+        if not clean_query:
+            return []
+
+        bounded_limit = max(1, min(limit, 3))
+
+        raw_tokens = re.findall(r"\b[a-zA-Z0-9_\u0080-\uffff]+\b", clean_query.lower())
+        tokens = [t for t in raw_tokens if t not in COMMON_QUERY_STOPWORDS and len(t) > 1]
+        if not tokens:
+            return []
+
+        results: list[MemoryRecord] = []
+
+        # 1. Try SQLite FTS5 Match with OR across significant keywords
+        if self._fts_available:
+            fts_query = " OR ".join(f'"{t}"' for t in tokens[:10])
+            try:
+                sql = f"""
+                    SELECT m.id, m.category, m.key, m.content, m.source_type, m.source_conversation_id,
+                           m.confidence, m.is_pinned, m.metadata, m.created_at, m.updated_at, m.last_accessed_at,
+                           memories_fts.rank
+                    FROM memories m
+                    JOIN memories_fts ON m.rowid = memories_fts.rowid
+                    WHERE memories_fts MATCH ?
+                    ORDER BY memories_fts.rank ASC, m.is_pinned DESC, m.updated_at DESC
+                    LIMIT ?
+                """
+                with self._get_connection() as conn:
+                    rows = conn.execute(sql, (fts_query, bounded_limit)).fetchall()
+                    for row in rows:
+                        meta_dict = {}
+                        if row["metadata"]:
+                            try:
+                                meta_dict = json.loads(row["metadata"])
+                            except json.JSONDecodeError:
+                                meta_dict = {}
+                        results.append(
+                            MemoryRecord(
+                                id=row["id"],
+                                category=row["category"],
+                                key=row["key"],
+                                content=row["content"],
+                                source_type=row["source_type"],
+                                source_conversation_id=row["source_conversation_id"],
+                                confidence=row["confidence"],
+                                is_pinned=bool(row["is_pinned"]),
+                                metadata=meta_dict,
+                                created_at=row["created_at"],
+                                updated_at=row["updated_at"],
+                                last_accessed_at=row["last_accessed_at"],
+                            )
+                        )
+            except sqlite3.OperationalError as e:
+                logger.debug("FTS5 match failed during retrieve_relevant_memories (%s); falling back to LIKE.", e)
+
+        # 2. Parameterized LIKE Fallback if FTS5 is unavailable or failed
+        if not results and not self._fts_available:
+            like_clauses: list[str] = []
+            params_like: list[Any] = []
+            for token in tokens[:5]:
+                like_clauses.append("(content LIKE ? OR key LIKE ?)")
+                like_pattern = f"%{token}%"
+                params_like.extend([like_pattern, like_pattern])
+
+            params_like.append(bounded_limit)
+            sql_like = f"""
+                SELECT id, category, key, content, source_type, source_conversation_id,
+                       confidence, is_pinned, metadata, created_at, updated_at, last_accessed_at
+                FROM memories
+                WHERE ({' OR '.join(like_clauses)})
+                ORDER BY is_pinned DESC, updated_at DESC
+                LIMIT ?
+            """
+            try:
+                with self._get_connection() as conn:
+                    rows = conn.execute(sql_like, params_like).fetchall()
+                    for row in rows:
+                        meta_dict = {}
+                        if row["metadata"]:
+                            try:
+                                meta_dict = json.loads(row["metadata"])
+                            except json.JSONDecodeError:
+                                meta_dict = {}
+                        results.append(
+                            MemoryRecord(
+                                id=row["id"],
+                                category=row["category"],
+                                key=row["key"],
+                                content=row["content"],
+                                source_type=row["source_type"],
+                                source_conversation_id=row["source_conversation_id"],
+                                confidence=row["confidence"],
+                                is_pinned=bool(row["is_pinned"]),
+                                metadata=meta_dict,
+                                created_at=row["created_at"],
+                                updated_at=row["updated_at"],
+                                last_accessed_at=row["last_accessed_at"],
+                            )
+                        )
+            except sqlite3.Error as e:
+                logger.warning("LIKE fallback failed during retrieve_relevant_memories: %s", e)
+
+        if results and touch:
+            try:
+                now = _utc_now_iso()
+                with self._get_connection() as conn:
+                    conn.executemany(
+                        "UPDATE memories SET last_accessed_at = ? WHERE id = ?",
+                        [(now, m.id) for m in results],
+                    )
+            except sqlite3.Error:
+                pass
+
+        return results[:bounded_limit]
