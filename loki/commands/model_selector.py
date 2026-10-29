@@ -183,30 +183,10 @@ def parse_and_validate_tool_call(
 
             # Verify safe read root if gatekeeper is present
             if gatekeeper is not None:
-                user_home = Path.home().resolve()
-                project_root = Path(__file__).resolve().parents[2]
-                alias_map = {
-                    "downloads": user_home / "Downloads",
-                    "download": user_home / "Downloads",
-                    "documents": user_home / "Documents",
-                    "docs": user_home / "Documents",
-                    "doc": user_home / "Documents",
-                    "desktop": user_home / "Desktop",
-                    "pictures": user_home / "Pictures",
-                    "pics": user_home / "Pictures",
-                    "images": user_home / "Pictures",
-                    "videos": user_home / "Videos",
-                    "vids": user_home / "Videos",
-                    "music": user_home / "Music",
-                    "project": project_root,
-                    "loki project": project_root,
-                    "loki": project_root,
-                    "workspace": project_root,
-                }
-                loc_clean = re.sub(r"^(?:my|the)\s+", "", location.strip(), flags=re.IGNORECASE).strip()
-                loc_clean = re.sub(r"\s+(?:folder|directory|dir)$", "", loc_clean, flags=re.IGNORECASE).strip()
-                resolved_loc = alias_map.get(loc_clean.lower(), Path(loc_clean).resolve())
-                if not gatekeeper.is_path_safe_for_read(resolved_loc):
+                from ..utils.paths import resolve_safe_directory
+
+                resolved_loc, _ = resolve_safe_directory(location, gatekeeper=gatekeeper, for_write=False)
+                if not resolved_loc:
                     return None, f"Location '{location}' is restricted or outside safe read roots."
 
     # Invariant 6: Path and extension checks for file_create / folder_create
@@ -230,30 +210,10 @@ def parse_and_validate_tool_call(
             return None, f"Creating files with prohibited executable/script extension '{ext}' is not permitted."
 
         if gatekeeper is not None:
-            user_home = Path.home().resolve()
-            project_root = Path(__file__).resolve().parents[2]
-            alias_map = {
-                "downloads": user_home / "Downloads",
-                "download": user_home / "Downloads",
-                "documents": user_home / "Documents",
-                "docs": user_home / "Documents",
-                "doc": user_home / "Documents",
-                "desktop": user_home / "Desktop",
-                "pictures": user_home / "Pictures",
-                "pics": user_home / "Pictures",
-                "images": user_home / "Pictures",
-                "videos": user_home / "Videos",
-                "vids": user_home / "Videos",
-                "music": user_home / "Music",
-                "project": project_root,
-                "loki project": project_root,
-                "loki": project_root,
-                "workspace": project_root,
-            }
-            loc_clean = re.sub(r"^(?:my|the)\s+", "", location.strip(), flags=re.IGNORECASE).strip()
-            loc_clean = re.sub(r"\s+(?:folder|directory|dir)$", "", loc_clean, flags=re.IGNORECASE).strip()
-            resolved_loc = alias_map.get(loc_clean.lower(), Path(loc_clean).resolve())
-            if not gatekeeper.is_path_safe_for_write(resolved_loc):
+            from ..utils.paths import resolve_safe_directory
+
+            resolved_loc, _ = resolve_safe_directory(location, gatekeeper=gatekeeper, for_write=True)
+            if not resolved_loc:
                 return None, f"Creation location '{location}' is restricted or outside safe write roots."
             dest = (resolved_loc / name).resolve()
             if not gatekeeper.is_path_safe_for_write(dest):

@@ -224,71 +224,9 @@ class FileCreateCommand(BaseCommand):
         Returns:
             A tuple of (target_dir, error_message).
         """
-        user_home = Path.home().resolve()
-        project_root = Path(__file__).resolve().parents[3]
+        from ...utils.paths import resolve_safe_directory
 
-        loc_clean = self._clean_location_string(location) or location.strip()
-        loc_lower = loc_clean.lower()
-
-        alias_map = {
-            "downloads": user_home / "Downloads",
-            "download": user_home / "Downloads",
-            "documents": user_home / "Documents",
-            "docs": user_home / "Documents",
-            "doc": user_home / "Documents",
-            "desktop": user_home / "Desktop",
-            "pictures": user_home / "Pictures",
-            "pics": user_home / "Pictures",
-            "images": user_home / "Pictures",
-            "videos": user_home / "Videos",
-            "vids": user_home / "Videos",
-            "music": user_home / "Music",
-            "project": project_root,
-            "loki project": project_root,
-            "loki": project_root,
-            "workspace": project_root,
-        }
-
-        if loc_lower in alias_map:
-            target_dir = alias_map[loc_lower]
-        else:
-            try:
-                target_dir = Path(loc_clean).resolve()
-            except Exception:
-                return None, f"Invalid location path: '{location}'."
-
-        if not target_dir.exists():
-            return None, f"Target directory does not exist: '{location}'."
-
-        if not target_dir.is_dir():
-            return None, f"Target location is not a directory: '{location}'."
-
-        # Validate directory is safe for writing
-        if gatekeeper is not None:
-            if not gatekeeper.is_path_safe_for_write(target_dir):
-                return None, (
-                    f"Creation blocked: Target directory '{target_dir}' is outside approved write roots."
-                )
-        else:
-            allowed_defaults = [
-                user_home / "Documents",
-                user_home / "Downloads",
-                user_home / "Desktop",
-                user_home / "Pictures",
-                user_home / "Videos",
-                user_home / "Music",
-                project_root,
-            ]
-            is_contained = any(
-                r == target_dir or r in target_dir.parents
-                for r in allowed_defaults
-            )
-            if not is_contained:
-                return None, (
-                    f"Creation blocked: Target directory '{target_dir}' is outside approved write roots."
-                )
-
-        return target_dir, None
+        return resolve_safe_directory(location, gatekeeper=gatekeeper, for_write=True)
 
     def run(
         self,

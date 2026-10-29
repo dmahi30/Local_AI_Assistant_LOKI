@@ -73,16 +73,25 @@ class SafetyGatekeeper:
     @staticmethod
     def _get_default_search_roots() -> list[Path]:
         """Compute platform-appropriate safe user directories for search and file ops."""
+        from ..utils.paths import get_all_known_folder_paths, get_project_root
+
         user_home = Path.home().resolve()
-        safe_roots = [
-            user_home,
-            user_home / "Documents",
-            user_home / "Downloads",
-            user_home / "Desktop",
-            user_home / "Pictures",
-            user_home / "Videos",
-            user_home / "Music",
-        ]
+        safe_roots = [user_home]
+
+        # Add all resolved known folders (Desktop, Documents, Downloads, Pictures, etc., including OneDrive)
+        for kf in get_all_known_folder_paths():
+            if kf and kf.exists() and kf not in safe_roots:
+                safe_roots.append(kf)
+
+        for sub in ["Documents", "Downloads", "Desktop", "Pictures", "Videos", "Music"]:
+            p = (user_home / sub).resolve()
+            if p.exists() and p not in safe_roots:
+                safe_roots.append(p)
+
+        proj = get_project_root()
+        if proj.exists() and proj not in safe_roots:
+            safe_roots.append(proj)
+
         # Include custom local app directory if set
         local_app = os.environ.get("LOCALAPPDATA")
         if local_app:

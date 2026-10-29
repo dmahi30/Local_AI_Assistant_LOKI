@@ -276,7 +276,6 @@ class FileSearchCommand(BaseCommand):
             A tuple of (roots, error_message).
         """
         user_home = Path.home().resolve()
-        project_root = Path(__file__).resolve().parents[3]
 
         if not location:
             if gatekeeper and gatekeeper.allowed_search_roots:
@@ -287,51 +286,18 @@ class FileSearchCommand(BaseCommand):
                 if not default_roots:
                     default_roots = gatekeeper.allowed_search_roots
             else:
-                default_roots = [
-                    user_home / "Documents",
-                    user_home / "Downloads",
-                    user_home / "Desktop",
-                ]
+                from ...utils.paths import get_default_search_roots
+                default_roots = get_default_search_roots()
             roots = [r for r in default_roots if r.exists()]
             if not roots:
                 return [], "No safe default search directories found."
             return roots, None
 
-        loc_clean = self._clean_location_string(location) or location.strip()
-        loc_lower = loc_clean.lower()
+        from ...utils.paths import resolve_safe_directory
 
-        alias_map = {
-            "downloads": user_home / "Downloads",
-            "download": user_home / "Downloads",
-            "documents": user_home / "Documents",
-            "docs": user_home / "Documents",
-            "doc": user_home / "Documents",
-            "desktop": user_home / "Desktop",
-            "pictures": user_home / "Pictures",
-            "pics": user_home / "Pictures",
-            "images": user_home / "Pictures",
-            "videos": user_home / "Videos",
-            "vids": user_home / "Videos",
-            "music": user_home / "Music",
-            "project": project_root,
-            "loki project": project_root,
-            "loki": project_root,
-            "workspace": project_root,
-        }
-
-        if loc_lower in alias_map:
-            target_dir = alias_map[loc_lower]
-        else:
-            try:
-                target_dir = Path(loc_clean).resolve()
-            except Exception:
-                return [], f"Invalid location path: '{location}'."
-
-        if not target_dir.exists():
-            return [], f"Specified search location does not exist: '{location}'."
-
-        if not target_dir.is_dir():
-            return [], f"Specified search location is not a directory: '{location}'."
+        target_dir, err = resolve_safe_directory(location, gatekeeper=gatekeeper, for_write=False)
+        if not target_dir:
+            return [], err
 
         # Security: ensure target directory itself is not a symlink/junction escaping safe boundaries
         if self._is_symlink_or_junction(target_dir):
@@ -341,33 +307,6 @@ class FileSearchCommand(BaseCommand):
                     return [], f"Invalid or disallowed search location: '{location}'. Symlink/junction target is outside safe directories."
             except Exception:
                 return [], f"Invalid search location: '{location}'."
-
-        # Validate with gatekeeper whitelist and blacklist
-        if gatekeeper is not None:
-            if not gatekeeper.is_path_safe_for_read(target_dir):
-                return [], (
-                    f"Invalid or disallowed search location: '{location}'. "
-                    "Searches are restricted to safe user directories."
-                )
-        else:
-            allowed_defaults = [
-                user_home / "Documents",
-                user_home / "Downloads",
-                user_home / "Desktop",
-                user_home / "Pictures",
-                user_home / "Videos",
-                user_home / "Music",
-                project_root,
-            ]
-            is_contained = any(
-                r == target_dir or r in target_dir.parents
-                for r in allowed_defaults
-            )
-            if not is_contained:
-                return [], (
-                    f"Invalid or disallowed search location: '{location}'. "
-                    "Searches are restricted to safe user directories."
-                )
 
         return [target_dir], None
 
