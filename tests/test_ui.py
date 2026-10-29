@@ -761,3 +761,249 @@ def test_ui_confirm_rejects_invalid_targets_count():
 
     assert exc_info.value.status_code == 400
     assert "Invalid file deletion confirmation targets" in exc_info.value.detail
+
+
+# =============================================================================
+# Phase 10 Document Attachments and Upload Tests
+# =============================================================================
+
+
+def test_ui_upload_valid_text_document(mock_agent):
+    """Verify /api/upload accepts valid plain-text document and stages locally."""
+    import io
+    from fastapi.testclient import TestClient
+
+    app = create_ui_app(agent=mock_agent)
+    client = TestClient(app)
+
+    file_content = b"Phase 10 document upload integration test content."
+    res = client.post(
+        "/api/upload",
+        files={"file": ("notes.txt", io.BytesIO(file_content), "text/plain")},
+    )
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["success"] is True
+    assert data["filename"] == "notes.txt"
+    assert data["size_bytes"] == len(file_content)
+
+    staged_path = Path(data["path"])
+    assert staged_path.exists()
+    assert staged_path.read_bytes() == file_content
+
+
+def test_ui_upload_valid_markdown_and_csv(mock_agent):
+    """Verify /api/upload accepts .md and .csv files."""
+    import io
+    from fastapi.testclient import TestClient
+
+    app = create_ui_app(agent=mock_agent)
+    client = TestClient(app)
+
+    # Markdown
+    res_md = client.post(
+        "/api/upload",
+        files={"file": ("readme.md", io.BytesIO(b"# Header\nDetails here."), "text/markdown")},
+    )
+    assert res_md.status_code == 200
+    assert res_md.json()["filename"] == "readme.md"
+
+    # CSV
+    res_csv = client.post(
+        "/api/upload",
+        files={"file": ("data.csv", io.BytesIO(b"id,name,score\n1,Alice,95\n"), "text/csv")},
+    )
+    assert res_csv.status_code == 200
+    assert res_csv.json()["filename"] == "data.csv"
+
+
+def test_ui_upload_valid_pdf(mock_agent):
+    """Verify /api/upload accepts .pdf files."""
+    import io
+    from fastapi.testclient import TestClient
+
+    app = create_ui_app(agent=mock_agent)
+    client = TestClient(app)
+
+    pdf_bytes = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF"
+    res = client.post(
+        "/api/upload",
+        files={"file": ("doc.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+    )
+    assert res.status_code == 200
+    assert res.json()["filename"] == "doc.pdf"
+
+
+def test_ui_upload_rejects_unsupported_extensions(mock_agent):
+    """Verify /api/upload rejects unapproved extensions."""
+    import io
+    from fastapi.testclient import TestClient
+
+    app = create_ui_app(agent=mock_agent)
+    client = TestClient(app)
+
+    unsupported = [
+        ("malicious.exe", b"MZ...", "application/octet-stream"),
+        ("script.py", b"print('hello')", "text/x-python"),
+        ("doc.docx", b"PK...", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    ]
+
+    for name, content, mime in unsupported:
+        res = client.post(
+            "/api/upload",
+            files={"file": (name, io.BytesIO(content), mime)},
+        )
+        assert res.status_code == 400
+        assert "Unsupported file format" in res.json()["detail"]
+
+
+def test_ui_upload_rejects_empty_file(mock_agent):
+    """Verify /api/upload rejects empty 0-byte files."""
+    import io
+    from fastapi.testclient import TestClient
+
+    app = create_ui_app(agent=mock_agent)
+    client = TestClient(app)
+
+    res = client.post(
+        "/api/upload",
+        files={"file": ("empty.txt", io.BytesIO(b""), "text/plain")},
+    )
+    assert res.status_code == 400
+    assert "empty" in res.json()["detail"].lower()
+
+
+def test_ui_upload_rejects_oversized_file(mock_agent, monkeypatch):
+    """Verify /api/upload rejects files exceeding maximum allowed bytes."""
+    import io
+    from fastapi.testclient import TestClient
+    import loki.documents.reader as reader_module
+
+    # Lower the max file bytes temporarily for fast testing
+    monkeypatch.setattr(reader_module, "DEFAULT_MAX_FILE_BYTES", 50)
+
+    app = create_ui_app(agent=mock_agent)
+    client = TestClient(app)
+
+    big_content = b"A" * 100
+    res = client.post(
+        "/api/upload",
+        files={"file": ("large.txt", io.BytesIO(big_content), "text/plain")},
+    )
+    assert res.status_code == 400
+    assert "exceeds maximum allowed limit" in res.json()["detail"]
+
+
+def test_ui_upload_prevents_path_traversal(mock_agent):
+    """Verify /api/upload strips path traversal components from filenames."""
+    import io
+    from fastapi.testclient import TestClient
+    from loki.utils.paths import get_data_dir
+
+    app = create_ui_app(agent=mock_agent)
+    client = TestClient(app)
+
+    res = client.post(
+        "/api/upload",
+        files={"file": ("../../traversal.txt", io.BytesIO(b"safe content"), "text/plain")},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["filename"] == "traversal.txt"
+
+    staged_path = Path(data["path"])
+    attachments_dir = get_data_dir() / "attachments"
+    assert staged_path.parent.resolve() == attachments_dir.resolve()
+
+
+def test_ui_chat_with_valid_attachment_end_to_end(mock_agent):
+    """Verify /api/chat processes an attached document via document_query and returns grounded result."""
+    import io
+    from fastapi.testclient import TestClient
+
+    app = create_ui_app(agent=mock_agent)
+    client = TestClient(app)
+
+    # 1. Upload
+    doc_content = b"Project Apollo began in 1961 with the goal of landing humans on the Moon."
+    up_res = client.post(
+        "/api/upload",
+        files={"file": ("apollo.txt", io.BytesIO(doc_content), "text/plain")},
+    )
+    assert up_res.status_code == 200
+    up_data = up_res.json()
+
+    # 2. Chat with attachment
+    chat_res = client.post(
+        "/api/chat",
+        json={
+            "message": "What is the main topic in this document?",
+            "attachment": {
+                "filename": up_data["filename"],
+                "path": up_data["path"],
+                "size_bytes": up_data["size_bytes"],
+            },
+        },
+    )
+    assert chat_res.status_code == 200
+    res_data = chat_res.json()
+    assert res_data["success"] is True
+    assert res_data["matched_command"] == "document_query"
+    assert "apollo" in res_data["text"].lower()
+
+
+def test_ui_chat_with_attachment_and_empty_message(mock_agent):
+    """Verify /api/chat defaults to summarization when prompt is empty with an attachment."""
+    import io
+    from fastapi.testclient import TestClient
+
+    app = create_ui_app(agent=mock_agent)
+    client = TestClient(app)
+
+    up_res = client.post(
+        "/api/upload",
+        files={"file": ("summary_test.txt", io.BytesIO(b"Quarterly results: Q1 revenue was 5M USD."), "text/plain")},
+    )
+    assert up_res.status_code == 200
+    up_data = up_res.json()
+
+    chat_res = client.post(
+        "/api/chat",
+        json={
+            "message": "",
+            "attachment": {
+                "filename": up_data["filename"],
+                "path": up_data["path"],
+                "size_bytes": up_data["size_bytes"],
+            },
+        },
+    )
+    assert chat_res.status_code == 200
+    res_data = chat_res.json()
+    assert res_data["success"] is True
+    assert res_data["matched_command"] == "document_query"
+
+
+def test_ui_chat_rejects_unauthorized_attachment_path(mock_agent):
+    """Verify /api/chat fails closed when attachment path is outside approved read roots."""
+    from fastapi.testclient import TestClient
+
+    app = create_ui_app(agent=mock_agent)
+    client = TestClient(app)
+
+    chat_res = client.post(
+        "/api/chat",
+        json={
+            "message": "Summarize this system file",
+            "attachment": {
+                "filename": "hosts",
+                "path": r"C:\Windows\System32\drivers\etc\hosts",
+                "size_bytes": 100,
+            },
+        },
+    )
+    assert chat_res.status_code == 200
+    res_data = chat_res.json()
+    assert res_data["success"] is False
+    assert "Access blocked" in res_data["text"]

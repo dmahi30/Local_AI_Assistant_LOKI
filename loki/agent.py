@@ -15,6 +15,7 @@ All system operations MUST originate directly from explicit deterministic user i
 from __future__ import annotations
 
 from enum import Enum
+from pathlib import Path
 from typing import Any
 from pydantic import BaseModel, Field
 
@@ -159,6 +160,55 @@ class LokiAgent:
         self._conversation_history.clear()
         if self.storage and self.active_conversation_id:
             self.storage.clear_messages(self.active_conversation_id)
+            self.storage.update_title(self.active_conversation_id, "New Chat")
+
+    def _maybe_auto_title(
+        self,
+        conversation_id: str,
+        prompt: str,
+        attachment: dict[str, Any] | None = None,
+    ) -> None:
+        """Auto-generate a meaningful conversation title on first message turn."""
+        if not self.storage or not conversation_id:
+            return
+        detail = self.storage.get_conversation(conversation_id)
+        if not detail:
+            return
+        if detail.title in ("New Chat", "Untitled Conversation") and len(detail.messages) == 0:
+            att_filename = attachment.get("filename") if (attachment and isinstance(attachment, dict)) else None
+            clean_prompt = prompt.strip() if prompt else ""
+
+            if att_filename:
+                lower_p = clean_prompt.lower()
+                is_generic = (
+                    not clean_prompt
+                    or lower_p in (
+                        "summarize this file",
+                        "summarize this file.",
+                        "summarize this document",
+                        "summarize this document.",
+                        "summarize this pdf",
+                        "summarize this pdf.",
+                        "summarize this",
+                        "summarize",
+                        "explain this",
+                        "read this",
+                    )
+                    or lower_p.startswith("summarize this ")
+                    or lower_p == f"summarize {att_filename.lower()}."
+                    or lower_p == f"summarize {att_filename.lower()}"
+                )
+                if is_generic:
+                    candidate = f"Summarize {att_filename}"
+                else:
+                    candidate = f"{clean_prompt} ({att_filename})"
+                auto_title = self.storage.generate_title_from_prompt(candidate)
+            elif clean_prompt:
+                auto_title = self.storage.generate_title_from_prompt(clean_prompt)
+            else:
+                auto_title = "New Chat"
+
+            self.storage.update_title(conversation_id, auto_title)
 
     def get_history(self) -> list[dict[str, str]]:
         """Return a copy of the current conversational context history."""
@@ -185,6 +235,17 @@ class LokiAgent:
                 return f"File '{name}' created successfully at {path}{size_str}."
             if "deleted_file" in data:
                 return f"File deleted successfully: {data.get('deleted_file')}"
+            if "analysis" in data and "document" in data:
+                doc_name = data.get("document", "Document")
+                task_desc = data.get("task", "Analysis").capitalize()
+                pages_info = f" ({data.get('page_count')} page(s))" if data.get("page_count", 1) > 1 else ""
+                return f"### {task_desc} of {doc_name}{pages_info}\n\n{data['analysis']}"
+            if "document_text" in data and "document" in data:
+                doc_name = data.get("document", "Document")
+                pages_info = f" ({data.get('page_count')} page(s))" if data.get("page_count", 1) > 1 else ""
+                return f"### Contents of {doc_name}{pages_info}\n\n{data['document_text']}"
+            if "is_scanned" in data:
+                return data.get("message", "Scanned PDF detected. OCR is required.")
             if "battery" in data:
                 b = data["battery"]
                 if "percent" in b:
@@ -231,6 +292,7 @@ class LokiAgent:
         action_id: str | None = None,
         chat_mode: bool = True,
         conversation_id: str | None = None,
+        attachment: dict[str, Any] | None = None,
     ) -> AgentResponse:
         """Process user input through deterministic routing, falling back to local LLM.
 
@@ -250,13 +312,16 @@ class LokiAgent:
             effective_conv_id = created.id
             self.active_conversation_id = effective_conv_id
 
-        if not clean_input:
+        if not clean_input and not attachment:
             return AgentResponse(
                 text="Please provide a command or question.",
                 source=ResponseSource.SYSTEM,
                 success=False,
                 conversation_id=effective_conv_id,
             )
+
+        if attachment and not clean_input:
+            clean_input = f"Summarize {attachment.get('filename', 'this document')}."
 
         # Context isolation & conversation persistence setup
         if effective_conv_id and self.storage:
@@ -266,9 +331,99 @@ class LokiAgent:
             detail = self.storage.get_conversation(effective_conv_id)
             if not detail:
                 self.storage.create_conversation(title="New Chat", conversation_id=effective_conv_id)
-            elif detail.title in ("New Chat", "Untitled Conversation") and len(detail.messages) == 0:
-                auto_title = self.storage.generate_title_from_prompt(clean_input)
-                self.storage.update_title(effective_conv_id, auto_title)
+
+        # =========================================================================
+        # Stage -1: Attached Document Processing
+        # =========================================================================
+        if attachment and isinstance(attachment, dict):
+            att_path_str = attachment.get("path")
+            att_filename = attachment.get("filename", "document")
+            if not att_path_str:
+                return AgentResponse(
+                    text="Invalid attachment: missing file path.",
+                    source=ResponseSource.SYSTEM,
+                    success=False,
+                    conversation_id=effective_conv_id,
+                )
+
+            att_path = Path(att_path_str).resolve()
+            if not att_path.exists() or not att_path.is_file():
+                return AgentResponse(
+                    text=f"Attachment file not found on disk: '{att_filename}'.",
+                    source=ResponseSource.SYSTEM,
+                    success=False,
+                    conversation_id=effective_conv_id,
+                )
+
+            if not self.gatekeeper.is_path_safe_for_read(att_path):
+                return AgentResponse(
+                    text=f"Access blocked: Attachment '{att_path}' is outside approved directories.",
+                    source=ResponseSource.SYSTEM,
+                    success=False,
+                    conversation_id=effective_conv_id,
+                )
+
+            task = "summarize"
+            question = None
+            clean_lower = clean_input.lower()
+            if "simple words" in clean_lower or "explain" in clean_lower:
+                task = "explain"
+            elif any(k in clean_lower for k in ("main points", "key points", "important points", "dates and names", "main dates")):
+                task = "key_points"
+            elif any(k in clean_lower for k in ("read", "display", "show", "cat")):
+                task = "read"
+            elif any(q_word in clean_lower for q_word in ("what", "how", "why", "when", "who", "where", "is there", "does the", "can you tell", "?")):
+                task = "qa"
+                question = clean_input
+
+            doc_cmd = self.router.registry.get("document_query")
+            if not doc_cmd:
+                from .commands.builtin.document_query import DocumentQueryCommand
+                doc_cmd = DocumentQueryCommand()
+
+            tool_res = doc_cmd.run(
+                args={
+                    "target": str(att_path),
+                    "task": task,
+                    "question": question,
+                },
+                gatekeeper=self.gatekeeper,
+                client=self.client,
+            )
+
+            if tool_res.success:
+                output_text = self._format_tool_result(tool_res)
+            else:
+                output_text = f"Document processing failed: {tool_res.error}"
+
+            if self.storage and effective_conv_id:
+                self._maybe_auto_title(effective_conv_id, clean_input, attachment=attachment)
+                user_msg_text = f"{clean_input}\n[Attached: {att_filename}]" if clean_input else f"[Attached: {att_filename}]"
+                self.storage.add_message(
+                    effective_conv_id,
+                    role="user",
+                    content=user_msg_text,
+                    source="user",
+                    metadata={"attachment": attachment},
+                )
+                safe_data = tool_res.data if isinstance(tool_res.data, dict) else {"result": str(tool_res.data)}
+                self.storage.add_message(
+                    effective_conv_id,
+                    role="assistant",
+                    content=output_text,
+                    source="tool",
+                    metadata={"tool_name": "document_query", "data": safe_data, "attachment": attachment},
+                )
+
+            return AgentResponse(
+                text=output_text,
+                source=ResponseSource.TOOL,
+                matched_command="document_query",
+                tool_result=tool_res,
+                success=tool_res.success,
+                conversation_id=effective_conv_id,
+                metadata={"attachment": attachment, "data": tool_res.data},
+            )
 
         # =========================================================================
         # Stage 0: Deterministic Command Engine (LLM Bypass)
@@ -309,6 +464,7 @@ class LokiAgent:
                     output_text = f"Command failed: {res.error}"
 
                 if self.storage and effective_conv_id:
+                    self._maybe_auto_title(effective_conv_id, clean_input)
                     self.storage.add_message(effective_conv_id, role="user", content=clean_input, source="user")
                     safe_data = res.data if isinstance(res.data, dict) else {"result": str(res.data)}
                     self.storage.add_message(
@@ -361,6 +517,7 @@ class LokiAgent:
                                 output_text = f"Tool execution failed: {tool_res.error}"
 
                             if self.storage and effective_conv_id:
+                                self._maybe_auto_title(effective_conv_id, clean_input)
                                 self.storage.add_message(
                                     effective_conv_id, role="user", content=clean_input, source="user"
                                 )
@@ -422,6 +579,7 @@ class LokiAgent:
         # 2. Local AI Inference
         if chat_mode:
             if self.storage and effective_conv_id:
+                self._maybe_auto_title(effective_conv_id, clean_input)
                 self.storage.add_message(effective_conv_id, role="user", content=clean_input, source="user")
                 self._conversation_history = self.storage.get_context_messages(
                     effective_conv_id, max_messages=self.max_history_messages
@@ -488,6 +646,7 @@ class LokiAgent:
                     system=self.system_prompt,
                 )
                 if self.storage and effective_conv_id:
+                    self._maybe_auto_title(effective_conv_id, clean_input)
                     self.storage.add_message(effective_conv_id, role="user", content=clean_input, source="user")
                     self.storage.add_message(
                         effective_conv_id,

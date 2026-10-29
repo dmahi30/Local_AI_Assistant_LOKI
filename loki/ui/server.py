@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -34,12 +34,20 @@ logger = get_logger("ui.server")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
+class AttachmentPayload(BaseModel):
+    """Uploaded attachment reference."""
+    filename: str = Field(..., description="Original attachment file name")
+    path: str = Field(..., description="Staged file path on disk")
+    size_bytes: int = Field(default=0, description="File size in bytes")
+
+
 class ChatRequest(BaseModel):
     """Payload for user interaction with LokiAgent."""
     message: str = Field(..., description="User prompt or command text")
     action_id: str | None = Field(default=None, description="Confirmation token if approving a gated action")
     chat_mode: bool = Field(default=True, description="Whether to retain multi-turn context")
     conversation_id: str | None = Field(default=None, description="Target conversation session ID")
+    attachment: AttachmentPayload | None = Field(default=None, description="Optional attached document payload")
 
 
 class ConfirmRequest(BaseModel):
@@ -152,13 +160,31 @@ def create_ui_app(
     @app.get("/api/conversations")
     def list_conversations() -> dict[str, Any]:
         """List all conversations ordered from most recently active to oldest."""
-        conversations = conv_store.list_conversations()
-        return {"conversations": [c.model_dump() for c in conversations]}
+        all_convs = conv_store.list_conversations()
+        active_id = loki_agent.active_conversation_id
+        filtered = [
+            c for c in all_convs
+            if c.message_count > 0 or (active_id is not None and c.id == active_id)
+        ]
+        return {"conversations": [c.model_dump() for c in filtered]}
 
     @app.post("/api/conversations")
     def create_conversation(req: CreateConversationRequest | None = None) -> dict[str, Any]:
         """Create a new conversation session and switch to it."""
         title = (req.title.strip() if req and req.title else None) or "New Chat"
+        active_id = loki_agent.active_conversation_id
+        if active_id and title == "New Chat":
+            existing = conv_store.get_conversation(active_id)
+            if existing and existing.title == "New Chat" and len(existing.messages) == 0:
+                summary = ConversationSummary(
+                    id=existing.id,
+                    title=existing.title,
+                    created_at=existing.created_at,
+                    updated_at=existing.updated_at,
+                    message_count=0,
+                )
+                return {"conversation": summary.model_dump()}
+
         summary = conv_store.create_conversation(title=title)
         loki_agent.switch_conversation(summary.id)
         return {"conversation": summary.model_dump()}
@@ -219,8 +245,8 @@ def create_ui_app(
     @app.post("/api/chat")
     def chat(req: ChatRequest) -> dict[str, Any]:
         """Process user message through LokiAgent and persist turn to history."""
-        target_conv_id = req.conversation_id or loki_agent.active_conversation_id
-        if target_conv_id:
+        if req.conversation_id:
+            target_conv_id = req.conversation_id
             existing = conv_store.get_conversation(target_conv_id)
             if not existing:
                 created = conv_store.create_conversation(title="New Chat", conversation_id=target_conv_id)
@@ -229,11 +255,13 @@ def create_ui_app(
             created = conv_store.create_conversation(title="New Chat")
             target_conv_id = created.id
 
+        att_payload = req.attachment.model_dump() if req.attachment else None
         response = loki_agent.handle_input(
             text=req.message,
             action_id=req.action_id,
             chat_mode=req.chat_mode,
             conversation_id=target_conv_id,
+            attachment=att_payload,
         )
 
         return {
@@ -336,7 +364,68 @@ def create_ui_app(
         loki_agent.clear_history()
         return {"success": True, "message": "Conversation history cleared."}
 
-    # Serve static assets
+    @app.post("/api/upload")
+    async def upload_attachment(file: UploadFile = File(...)) -> dict[str, Any]:
+        """Safely stage an uploaded document attachment locally."""
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="Uploaded file missing filename.")
+
+        raw_name = Path(file.filename).name.strip()
+        if not raw_name or "\x00" in raw_name or "\n" in raw_name or "\r" in raw_name:
+            raise HTTPException(status_code=400, detail="Invalid filename characters.")
+
+        ext = Path(raw_name).suffix.lower()
+        allowed_exts = {".txt", ".pdf", ".csv", ".md"}
+        if ext not in allowed_exts:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file format '{ext}'. Supported formats: .txt, .pdf, .md, .csv.",
+            )
+
+        from ..documents.reader import DEFAULT_MAX_FILE_BYTES
+        max_bytes = DEFAULT_MAX_FILE_BYTES
+        content = bytearray()
+        chunk_size = 1024 * 64
+
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            content.extend(chunk)
+            if len(content) > max_bytes:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"File size exceeds maximum allowed limit of {max_bytes // (1024 * 1024)} MB.",
+                )
+
+        if len(content) == 0:
+            raise HTTPException(status_code=400, detail=f"Attached file '{raw_name}' is empty (0 bytes).")
+
+        from ..utils.paths import get_data_dir
+        import uuid
+        attachments_dir = get_data_dir() / "attachments"
+        attachments_dir.mkdir(parents=True, exist_ok=True)
+
+        unique_id = uuid.uuid4().hex[:8]
+        safe_file_name = f"{unique_id}_{raw_name}"
+        staged_path = attachments_dir / safe_file_name
+
+        try:
+            staged_path.write_bytes(content)
+        except OSError as e:
+            logger.error("Failed to write attachment to disk: %s", e)
+            raise HTTPException(status_code=500, detail=f"Failed to save attachment: {e}")
+
+        return {
+            "success": True,
+            "filename": raw_name,
+            "path": str(staged_path.resolve()),
+            "size_bytes": len(content),
+        }
+
+    # =========================================================================
+    # Static Asset Serving (Zero-External-Network)
+    # =========================================================================
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

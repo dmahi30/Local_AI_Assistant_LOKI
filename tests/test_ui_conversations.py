@@ -33,7 +33,7 @@ def mock_agent_and_store(tmp_path: Path):
     mock_client.get_version.return_value = "0.40.5"
     mock_client.list_local_models.return_value = ["qwen2.5:0.5b"]
     mock_client.is_model_available.return_value = True
-    mock_client.chat.side_effect = lambda msgs, **kwargs: f"Echo: {msgs[-1]['content']}"
+    mock_client.chat.side_effect = lambda messages=None, msgs=None, **kwargs: f"Echo: {(messages or msgs)[-1]['content']}"
 
     agent = LokiAgent(client=mock_client, storage=store)
     return agent, store
@@ -654,3 +654,242 @@ def test_conversation_deletion_behavioral_success_and_failure(mock_agent_and_sto
 
     # Invariant: Beta conversation survives aborted/failed deletion
     assert store.get_conversation(conv_b) is not None
+
+
+
+# =============================================================================
+# Recent Chats & Multiple Document Attachments Regression Tests
+# =============================================================================
+
+
+def test_ui_chat_multi_turn_and_multiple_attachments_stay_in_same_conversation(mock_agent_and_store, tmp_path: Path):
+    """Verify multiple attachments in one chat stay in that chat with a stable unique conversation ID."""
+    agent, store = mock_agent_and_store
+    app = create_ui_app(agent=agent, storage=store)
+
+    chat_fn = None
+    get_fn = None
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", set())
+        if path == "/api/chat" and "POST" in methods:
+            chat_fn = route.endpoint
+        elif path == "/api/conversations/{conversation_id}" and "GET" in methods:
+            get_fn = route.endpoint
+
+    agent.client.generate.return_value = "Mocked document analysis content."
+
+    # Create dummy files in agent approved read root
+    doc1 = tmp_path / "doc1.txt"
+    doc1.write_text("Document 1 content about astrophysics.", encoding="utf-8")
+    doc2 = tmp_path / "doc2.txt"
+    doc2.write_text("Document 2 content about quantum mechanics.", encoding="utf-8")
+
+    # Turn 1: First document attached in a new conversation
+    res1 = chat_fn(
+        ChatRequest(
+            message="summarize this file",
+            conversation_id=None,
+            attachment={
+                "filename": "doc1.txt",
+                "path": str(doc1),
+                "size_bytes": doc1.stat().st_size,
+            },
+        )
+    )
+    cid = res1["conversation_id"]
+    assert cid is not None
+    assert res1["success"] is True
+
+    # Turn 2: Second document attached in the SAME conversation
+    res2 = chat_fn(
+        ChatRequest(
+            message="summarize this document",
+            conversation_id=cid,
+            attachment={
+                "filename": "doc2.txt",
+                "path": str(doc2),
+                "size_bytes": doc2.stat().st_size,
+            },
+        )
+    )
+    assert res2["conversation_id"] == cid
+    assert res2["success"] is True
+
+    # Turn 3: Follow-up text query in the same conversation
+    res3 = chat_fn(
+        ChatRequest(
+            message="What was discussed in the first document?",
+            conversation_id=cid,
+        )
+    )
+    assert res3["conversation_id"] == cid
+    assert res3["success"] is True
+
+    # Verify message retention in the single conversation
+    detail = get_fn(cid)["conversation"]
+    assert detail["id"] == cid
+    assert len(detail["messages"]) == 6  # 3 turns * 2 messages (user + assistant)
+    assert "Summarize doc1.txt" in detail["title"]
+
+
+def test_ui_chat_without_conversation_id_creates_distinct_conversations(mock_agent_and_store):
+    """Verify /api/chat with conversation_id=None creates distinct conversations instead of hijacking active one."""
+    agent, store = mock_agent_and_store
+    app = create_ui_app(agent=agent, storage=store)
+
+    chat_fn = None
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", set())
+        if path == "/api/chat" and "POST" in methods:
+            chat_fn = route.endpoint
+
+    res1 = chat_fn(ChatRequest(message="Question 1", conversation_id=None))
+    cid1 = res1["conversation_id"]
+
+    res2 = chat_fn(ChatRequest(message="Question 2", conversation_id=None))
+    cid2 = res2["conversation_id"]
+
+    assert cid1 is not None
+    assert cid2 is not None
+    assert cid1 != cid2, "Each chat turn with conversation_id=None must have a distinct unique ID"
+
+
+def test_ui_attachment_auto_titles_distinguish_documents(mock_agent_and_store, tmp_path: Path):
+    """Verify distinct document requests receive distinct titles incorporating filenames rather than generic duplicates."""
+    agent, store = mock_agent_and_store
+    app = create_ui_app(agent=agent, storage=store)
+
+    chat_fn = None
+    get_fn = None
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", set())
+        if path == "/api/chat" and "POST" in methods:
+            chat_fn = route.endpoint
+        elif path == "/api/conversations/{conversation_id}" and "GET" in methods:
+            get_fn = route.endpoint
+
+    file_a = tmp_path / "IKS 5.pdf"
+    file_a.write_bytes(b"%PDF-1.4 header text content")
+    file_b = tmp_path / "WMC- Module 3.pdf"
+    file_b.write_bytes(b"%PDF-1.4 header text content")
+
+    # Chat A: generic prompt with IKS 5.pdf
+    res_a = chat_fn(
+        ChatRequest(
+            message="summarize this file",
+            conversation_id=None,
+            attachment={"filename": "IKS 5.pdf", "path": str(file_a), "size_bytes": 100},
+        )
+    )
+    detail_a = get_fn(res_a["conversation_id"])["conversation"]
+    assert "IKS 5.pdf" in detail_a["title"]
+
+    # Chat B: generic prompt with WMC- Module 3.pdf
+    res_b = chat_fn(
+        ChatRequest(
+            message="summarize this file",
+            conversation_id=None,
+            attachment={"filename": "WMC- Module 3.pdf", "path": str(file_b), "size_bytes": 100},
+        )
+    )
+    detail_b = get_fn(res_b["conversation_id"])["conversation"]
+    assert "WMC- Module 3.pdf" in detail_b["title"]
+
+    # Titles are distinguishable
+    assert detail_a["title"] != detail_b["title"]
+
+
+def test_ui_list_conversations_excludes_abandoned_empty_ghost_sessions(mock_agent_and_store):
+    """Verify abandoned 0-message sessions do not pollute GET /api/conversations as ghost chats."""
+    agent, store = mock_agent_and_store
+    app = create_ui_app(agent=agent, storage=store)
+
+    chat_fn = None
+    list_fn = None
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", set())
+        if path == "/api/chat" and "POST" in methods:
+            chat_fn = route.endpoint
+        elif path == "/api/conversations" and "GET" in methods:
+            list_fn = route.endpoint
+
+    # 1. Create 2 ghost empty conversations in storage directly
+    store.create_conversation(title="Summarize this file")
+    store.create_conversation(title="Summarize this file")
+
+    # 2. Create 1 real conversation with messages
+    res = chat_fn(ChatRequest(message="What is gravity?", conversation_id=None))
+    real_cid = res["conversation_id"]
+
+    # 3. Listing must exclude the 2 abandoned empty sessions
+    convs = list_fn()["conversations"]
+    conv_ids = [c["id"] for c in convs]
+    assert real_cid in conv_ids
+    assert len(convs) == 1, "Abandoned 0-message sessions must be filtered out from sidebar listing"
+
+
+def test_ui_create_conversation_reuses_active_empty_new_chat(mock_agent_and_store):
+    """Verify clicking New Chat when already on an empty New Chat reuses it without duplicates."""
+    agent, store = mock_agent_and_store
+    app = create_ui_app(agent=agent, storage=store)
+
+    create_fn = None
+    list_fn = None
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", set())
+        if path == "/api/conversations" and "POST" in methods:
+            create_fn = route.endpoint
+        elif path == "/api/conversations" and "GET" in methods:
+            list_fn = route.endpoint
+
+    # First call: creates New Chat
+    c1 = create_fn(CreateConversationRequest(title="New Chat"))["conversation"]
+    cid1 = c1["id"]
+
+    # Second call: title is "New Chat" and current active chat is still empty
+    c2 = create_fn(CreateConversationRequest(title="New Chat"))["conversation"]
+    cid2 = c2["id"]
+
+    assert cid1 == cid2, "Consecutive empty New Chat creations should reuse the active empty session"
+    assert len(list_fn()["conversations"]) == 1
+
+
+def test_ui_failed_attachment_does_not_leave_titled_ghost_conversation(mock_agent_and_store):
+    """Verify blocked/failed operations do not prematurely auto-title an empty conversation."""
+    agent, store = mock_agent_and_store
+    app = create_ui_app(agent=agent, storage=store)
+
+    chat_fn = None
+    get_fn = None
+    for route in app.routes:
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", set())
+        if path == "/api/chat" and "POST" in methods:
+            chat_fn = route.endpoint
+        elif path == "/api/conversations/{conversation_id}" and "GET" in methods:
+            get_fn = route.endpoint
+
+    # Target an unauthorized path that gatekeeper blocks
+    res = chat_fn(
+        ChatRequest(
+            message="summarize this file",
+            conversation_id=None,
+            attachment={
+                "filename": "hosts",
+                "path": r"C:\Windows\System32\drivers\etc\hosts",
+                "size_bytes": 100,
+            },
+        )
+    )
+    cid = res["conversation_id"]
+    assert res["success"] is False
+
+    detail = get_fn(cid)["conversation"]
+    # Invariant: Conversation was NOT renamed to "Summarize hosts" because operation failed
+    assert detail["title"] == "New Chat"
+    assert len(detail["messages"]) == 0

@@ -1038,6 +1038,111 @@ body {
   letter-spacing: 0.2px;
 }
 
+/* Attachment Preview above Composer */
+.attachment-preview-wrapper {
+  max-width: 860px;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  margin-bottom: 8px;
+  padding: 0 4px;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-gold-active);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 13px;
+  color: var(--text-bright);
+}
+
+.attachment-chip-icon {
+  color: var(--gold-bright);
+  display: flex;
+  align-items: center;
+}
+
+.attachment-chip-info {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 320px;
+}
+
+.attachment-chip-name {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--gold-muted);
+}
+
+.attachment-chip-size {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.attachment-remove-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border-radius: 50%;
+  transition: var(--transition-smooth);
+  margin-left: 4px;
+}
+
+.attachment-remove-btn:hover {
+  color: #FF6B6B;
+  background: rgba(255, 107, 107, 0.15);
+}
+
+/* User Message Attachment Badge */
+.user-attachment-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(212, 175, 55, 0.3);
+  padding: 4px 10px;
+  border-radius: 14px;
+  font-size: 12px;
+  margin-bottom: 8px;
+  color: var(--gold-muted);
+}
+
+.user-attachment-pill svg {
+  color: var(--gold-bright);
+}
+
+.user-attachment-name {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 250px;
+}
+
+.user-attachment-size {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.user-message-text {
+  word-break: break-word;
+}
+
 /* =========================================================================
    C. RIGHT SYSTEM STATUS DRAWER
    ========================================================================= */

@@ -174,6 +174,16 @@ def parse_and_validate_tool_call(
             if not any(kw in query_lower for kw in create_keywords):
                 return None, f"Tool '{tool_name}' proposed but user query contains no file/folder creation keywords."
 
+        elif tool_name == "document_query":
+            doc_keywords = (
+                "summarize", "summary", "explain", "describe", "read", "document", "pdf",
+                "extract", "points", "dates", "names", "key points", "notes", "csv", "image",
+                "ocr", "content", "contents", "what does", "what is in", "analyze", "analysis",
+                "dates and names", "simple words", "takeaways", "important",
+            )
+            if not any(kw in query_lower for kw in doc_keywords):
+                return None, "Tool 'document_query' proposed but user query contains no document analysis keywords."
+
     # Invariant 5: Additional path checks for file_search
     if tool_name == "file_search":
         location = args.get("location")
@@ -218,6 +228,30 @@ def parse_and_validate_tool_call(
             dest = (resolved_loc / name).resolve()
             if not gatekeeper.is_path_safe_for_write(dest):
                 return None, f"Destination path '{name}' is restricted or outside safe write roots."
+
+    # Invariant 7: Path checks for document_query
+    if tool_name == "document_query":
+        target = args.get("target")
+        location = args.get("location")
+        if not target:
+            return None, "Document query requires 'target' specifying the document."
+        if "\x00" in target or "\n" in target or "\r" in target:
+            return None, "Document target contains invalid characters."
+        if location and ("\x00" in location or "\n" in location or "\r" in location):
+            return None, "Document location contains invalid characters."
+        if gatekeeper is not None:
+            from ..utils.paths import resolve_safe_directory
+            if location:
+                target_dir, _ = resolve_safe_directory(location, gatekeeper=gatekeeper, for_write=False)
+                if not target_dir:
+                    return None, f"Location '{location}' is restricted or outside safe read roots."
+                dest = (target_dir / target).resolve()
+                if not gatekeeper.is_path_safe_for_read(dest):
+                    return None, f"Document path '{dest}' is restricted or outside safe read roots."
+            elif "/" in target or "\\" in target:
+                dest = Path(target).resolve()
+                if not gatekeeper.is_path_safe_for_read(dest):
+                    return None, f"Document path '{dest}' is restricted or outside safe read roots."
 
     return ModelToolProposal(tool_name=tool_name, arguments=args), None
 

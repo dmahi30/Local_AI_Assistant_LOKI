@@ -32,6 +32,12 @@ function initLokiApp() {
   const sendBtn = document.getElementById("sendBtn");
   const voiceBtn = document.getElementById("voiceBtn");
   const attachBtn = document.getElementById("attachBtn");
+  const filePicker = document.getElementById("filePicker");
+  const attachmentPreview = document.getElementById("attachmentPreview");
+  const attachmentName = document.getElementById("attachmentName");
+  const attachmentSize = document.getElementById("attachmentSize");
+  const removeAttachmentBtn = document.getElementById("removeAttachmentBtn");
+  let currentAttachmentFile = null;
 
   // Drawer Elements
   const drawerOllamaBadge = document.getElementById("drawerOllamaBadge");
@@ -188,15 +194,72 @@ function initLokiApp() {
     });
   }
 
-  if (attachBtn) {
+  // File Attachment Handling
+  function clearAttachment() {
+    currentAttachmentFile = null;
+    if (filePicker) filePicker.value = "";
+    if (attachmentPreview) attachmentPreview.style.display = "none";
+  }
+
+  if (attachBtn && filePicker) {
     attachBtn.addEventListener("click", () => {
-      if (emptyState) emptyState.style.display = "none";
-      appendAssistantMessage({
-        text: "📎 **File Attachments (Phase 7)**: Document and image ingestion is planned for a future phase. Please use direct text commands or file paths (e.g., search, delete).",
-        source: "system",
-        success: true,
-      });
-      scrollToBottom();
+      if (isInferring) return;
+      filePicker.click();
+    });
+
+    filePicker.addEventListener("change", () => {
+      if (!filePicker.files || filePicker.files.length === 0) return;
+      const file = filePicker.files[0];
+      const ext = "." + (file.name.split(".").pop() || "").toLowerCase();
+      const allowedExts = [".txt", ".pdf", ".csv", ".md"];
+
+      if (!allowedExts.includes(ext)) {
+        appendAssistantMessage({
+          text: `⚠️ **Unsupported file type** (\`${escapeHtml(ext)}\`). LOKI supports plain-text (\`.txt\`, \`.md\`, \`.csv\`) and PDF (\`.pdf\`) files.`,
+          source: "system",
+          success: false,
+        });
+        scrollToBottom();
+        clearAttachment();
+        return;
+      }
+
+      const maxBytes = 20 * 1024 * 1024; // 20 MB
+      if (file.size > maxBytes) {
+        appendAssistantMessage({
+          text: `⚠️ **File too large**: "${escapeHtml(file.name)}" (${formatBytes(file.size)}) exceeds the 20 MB size limit.`,
+          source: "system",
+          success: false,
+        });
+        scrollToBottom();
+        clearAttachment();
+        return;
+      }
+
+      if (file.size === 0) {
+        appendAssistantMessage({
+          text: `⚠️ **Empty file**: "${escapeHtml(file.name)}" contains 0 bytes.`,
+          source: "system",
+          success: false,
+        });
+        scrollToBottom();
+        clearAttachment();
+        return;
+      }
+
+      currentAttachmentFile = file;
+      if (attachmentName) attachmentName.textContent = file.name;
+      if (attachmentSize) attachmentSize.textContent = formatBytes(file.size);
+      if (attachmentPreview) attachmentPreview.style.display = "flex";
+      if (messageInput) messageInput.focus();
+    });
+  }
+
+  if (removeAttachmentBtn) {
+    removeAttachmentBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      clearAttachment();
+      if (messageInput) messageInput.focus();
     });
   }
 
@@ -239,7 +302,7 @@ function initLokiApp() {
       e.preventDefault();
       if (!messageInput) return;
       const text = messageInput.value.trim();
-      if (text && !isInferring) {
+      if ((text || currentAttachmentFile) && !isInferring) {
         submitMessage(text);
       }
     });
@@ -256,6 +319,14 @@ function initLokiApp() {
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return "0 B";
+    const k = 1024;
+    const sizes = ["B", "KB", "MB", "GB"];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
   }
 
   function formatRelativeTime(isoStr) {
@@ -340,7 +411,17 @@ function initLokiApp() {
       return;
     }
 
-    filtered.forEach((conv) => {
+    // Defensive deduplication by conversation ID
+    const seenIds = new Set();
+    const uniqueFiltered = [];
+    for (const c of filtered) {
+      if (c && c.id && !seenIds.has(c.id)) {
+        seenIds.add(c.id);
+        uniqueFiltered.push(c);
+      }
+    }
+
+    uniqueFiltered.forEach((conv) => {
       const item = document.createElement("div");
       item.className = "recent-item" + (conv.id === activeConversationId ? " active" : "");
       item.dataset.chatId = conv.id;
@@ -515,7 +596,8 @@ function initLokiApp() {
         if (emptyState) emptyState.style.display = "none";
         detail.messages.forEach((msg) => {
           if (msg.role === "user") {
-            appendUserMessage(msg.content, msg.created_at);
+            const att = (msg.metadata && msg.metadata.attachment) ? msg.metadata.attachment : null;
+            appendUserMessage(msg.content, msg.created_at, att);
           } else if (msg.role === "assistant") {
             appendAssistantMessage({
               text: msg.content,
@@ -535,6 +617,20 @@ function initLokiApp() {
 
   async function createNewConversation(title = "New Chat") {
     if (isInferring) return;
+    // If the active conversation is already empty and titled "New Chat", stay on it
+    if (activeConversationId) {
+      const activeItem = conversations.find((c) => c.id === activeConversationId);
+      if (activeItem && activeItem.title === "New Chat" && (!activeItem.message_count || activeItem.message_count === 0)) {
+        if (chatStream) chatStream.innerHTML = "";
+        if (emptyState) emptyState.style.display = "flex";
+        if (messageInput) {
+          messageInput.value = "";
+          messageInput.style.height = "auto";
+          messageInput.focus();
+        }
+        return;
+      }
+    }
     try {
       const res = await fetch("/api/conversations", {
         method: "POST",
@@ -582,6 +678,10 @@ function initLokiApp() {
   // 4. Message Handling & Backend Communication
   // =========================================================================
   async function submitMessage(text) {
+    const fileToUpload = currentAttachmentFile;
+    // Clear composer attachment selection immediately
+    clearAttachment();
+
     lastPrompt = text;
     if (messageInput) {
       messageInput.value = "";
@@ -593,8 +693,51 @@ function initLokiApp() {
       emptyState.style.display = "none";
     }
 
-    // Append User Message
-    appendUserMessage(text);
+    let uploadedPayload = null;
+
+    // Stage attachment file to backend if attached
+    if (fileToUpload) {
+      const uploadLoadingElem = appendLoadingIndicator();
+      scrollToBottom();
+      try {
+        const formData = new FormData();
+        formData.append("file", fileToUpload);
+        const upRes = await fetch("/api/upload", {
+          method: "POST",
+          body: formData,
+        });
+        if (!upRes.ok) {
+          let errDetail = `HTTP ${upRes.status}`;
+          try {
+            const errData = await upRes.json();
+            if (errData && errData.detail) errDetail = errData.detail;
+          } catch {}
+          throw new Error(errDetail);
+        }
+        const upData = await upRes.json();
+        uploadedPayload = {
+          filename: upData.filename,
+          path: upData.path,
+          size_bytes: upData.size_bytes,
+        };
+      } catch (uploadErr) {
+        if (uploadLoadingElem) uploadLoadingElem.remove();
+        appendAssistantMessage({
+          text: `⚠️ **Attachment Upload Failed**: ${uploadErr.message}`,
+          source: "system",
+          success: false,
+        });
+        setInferringState(false);
+        scrollToBottom();
+        return;
+      }
+      if (uploadLoadingElem) uploadLoadingElem.remove();
+    }
+
+    const effectivePrompt = text || (uploadedPayload ? `Summarize ${uploadedPayload.filename}.` : "");
+
+    // Append User Message with attachment pill if attached
+    appendUserMessage(effectivePrompt, new Date(), uploadedPayload);
 
     // Append Loading Indicator
     const loadingElem = appendLoadingIndicator();
@@ -605,8 +748,9 @@ function initLokiApp() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          message: text,
+          message: effectivePrompt,
           conversation_id: activeConversationId,
+          attachment: uploadedPayload,
         }),
       });
 
@@ -619,7 +763,7 @@ function initLokiApp() {
       }
 
       if (data.pending_confirmation) {
-        appendConfirmationCard(data.pending_confirmation, text);
+        appendConfirmationCard(data.pending_confirmation, effectivePrompt);
       } else {
         appendAssistantMessage(data);
       }
@@ -665,14 +809,32 @@ function initLokiApp() {
   // =========================================================================
   // 5. DOM Rendering for Messages
   // =========================================================================
-  function appendUserMessage(text, timestamp) {
+  function appendUserMessage(text, timestamp, attachment) {
     if (!chatStream) return;
     const row = document.createElement("div");
     row.className = "message-row user";
 
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-    bubble.textContent = text;
+
+    if (attachment && (attachment.filename || typeof attachment === "string")) {
+      const attFilename = typeof attachment === "string" ? attachment : attachment.filename;
+      const attSize = (typeof attachment === "object" && attachment.size_bytes) ? formatBytes(attachment.size_bytes) : "";
+
+      const attPill = document.createElement("div");
+      attPill.className = "user-attachment-pill";
+      attPill.innerHTML = `
+        <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        <span class="user-attachment-name" title="${escapeHtml(attFilename)}">${escapeHtml(attFilename)}</span>
+        ${attSize ? `<span class="user-attachment-size">${escapeHtml(attSize)}</span>` : ""}
+      `;
+      bubble.appendChild(attPill);
+    }
+
+    const textDiv = document.createElement("div");
+    textDiv.className = "user-message-text";
+    textDiv.textContent = text;
+    bubble.appendChild(textDiv);
 
     const meta = document.createElement("div");
     meta.className = "bubble-meta";

@@ -7,6 +7,7 @@ from typing import Any
 from .base import BaseCommand
 from .builtin import (
     AppLauncherCommand,
+    DocumentQueryCommand,
     FileCreateCommand,
     FileDeleteCommand,
     FileSearchCommand,
@@ -24,6 +25,7 @@ class CommandRegistry:
             self.register(SystemInfoCommand())
             self.register(AppLauncherCommand())
             self.register(FileSearchCommand())
+            self.register(DocumentQueryCommand())
             self.register(FileCreateCommand())
             self.register(FolderCreateCommand())
             self.register(FileDeleteCommand())
